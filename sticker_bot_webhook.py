@@ -588,6 +588,19 @@ def webhook():
         send_message(chat_id, f"Bugungi foydalanish: {status}")
         return {"ok": True}
 
+    if text.lower().startswith("/reload"):
+        if user_id != SUPERADMIN_ID:
+            return {"ok": True}
+        global STATE
+        STATE = load_state()
+        send_message(
+            chat_id,
+            f"🔄 Ma'lumotlar DB guruhidan qayta yuklandi.\n"
+            f"Adminlar: {len(STATE['admins'])}\n"
+            f"Foydalanuvchilar: {len(STATE['users'])}",
+        )
+        return {"ok": True}
+
     if text.startswith("/addadmin"):
         if user_id != SUPERADMIN_ID:
             return {"ok": True}
