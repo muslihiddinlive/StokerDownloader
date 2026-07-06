@@ -417,7 +417,7 @@ def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, 
         send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} yuklagan sticker")
 
 
-
+def requester_label(from_user):
     return (
         f"@{from_user.get('username')} (id:{from_user.get('id')})"
         if from_user.get("username")
