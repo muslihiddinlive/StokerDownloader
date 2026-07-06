@@ -368,7 +368,56 @@ def extract_pack_name_from_message(msg):
     return None
 
 
-def requester_label(from_user):
+def extract_single_sticker_file(msg):
+    """Xabardagi bitta sticker/custom emoji faylini (file_id, ext, emoji) qaytaradi."""
+    sticker = msg.get("sticker")
+    if sticker:
+        return sticker["file_id"], file_ext_for(sticker), sticker.get("emoji", "")
+
+    for field, entity_field in (("text", "entities"), ("caption", "caption_entities")):
+        entities = msg.get(entity_field) or []
+        for ent in entities:
+            if ent.get("type") == "custom_emoji" and ent.get("custom_emoji_id"):
+                data = tg_call("getCustomEmojiStickers", custom_emoji_ids=[ent["custom_emoji_id"]])
+                if data.get("ok") and data["result"]:
+                    em = data["result"][0]
+                    return em["file_id"], file_ext_for(em), em.get("emoji", "")
+
+    return None, None, None
+
+
+def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason, reply_to=reply_to)
+        return
+
+    file_id, ext, emoji_char = extract_single_sticker_file(reply)
+    if not file_id:
+        send_message(chat_id, "Bu xabarda sticker/custom emoji topilmadi.", reply_to=reply_to)
+        return
+
+    file_path = get_file_path(file_id)
+    if not file_path:
+        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
+        return
+
+    content = download_file_bytes(file_path)
+    register_request(requester_id)
+
+    filename = f"sticker_{emoji_char}{ext}".replace("/", "_")
+    send_document_bytes(chat_id, filename, content)
+
+    notify_admin(
+        f"✅ Bitta sticker yuklandi\n"
+        f"Kimdan: {requester_info}\n"
+        f"Fayl: {filename}"
+    )
+    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+        send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} yuklagan sticker")
+
+
+
     return (
         f"@{from_user.get('username')} (id:{from_user.get('id')})"
         if from_user.get("username")
@@ -380,6 +429,15 @@ def requester_label(from_user):
 
 def handle_group_dot_commands(msg, chat_id, user_id, text):
     reply = msg.get("reply_to_message")
+
+    if text.strip() == ".zipstiker":
+        if not is_admin(user_id):
+            return True
+        if not reply:
+            send_message(chat_id, "Sticker/custom emoji xabariga reply qilib .zipstiker yozing.")
+            return True
+        handle_single_sticker_request(chat_id, reply, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
+        return True
 
     if text.strip() == ".zip":
         if not is_admin(user_id):
@@ -529,6 +587,16 @@ def webhook():
             if r.get("ok"):
                 sent += 1
         send_message(chat_id, f"Reklama {sent} ta foydalanuvchiga yuborildi.")
+        return {"ok": True}
+
+    if text.strip() == ".zipstiker":
+        if not is_admin(user_id):
+            return {"ok": True}
+        reply = msg.get("reply_to_message")
+        if not reply:
+            send_message(chat_id, "Sticker/custom emoji xabariga reply qilib .zipstiker yozing.")
+            return {"ok": True}
+        handle_single_sticker_request(chat_id, reply, requester_info, user_id)
         return {"ok": True}
 
     if text.startswith("/getpack"):
