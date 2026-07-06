@@ -71,6 +71,14 @@ def get_sticker_set(pack_name):
     return None
 
 
+def get_custom_emoji_set_name(custom_emoji_id):
+    """Custom emoji ID orqali uning pack (set_name) nomini topadi."""
+    data = tg_call("getCustomEmojiStickers", custom_emoji_ids=[custom_emoji_id])
+    if data.get("ok") and data["result"]:
+        return data["result"][0].get("set_name")
+    return None
+
+
 def get_file_path(file_id):
     data = tg_call("getFile", file_id=file_id)
     if data.get("ok"):
@@ -149,11 +157,44 @@ def handle_pack_request(chat_id, pack_name, requester_info):
     )
 
 
+def extract_pack_name_from_link(text):
+    """Matn ichidan t.me/addstickers/NAME yoki t.me/addemoji/NAME ko'rinishidagi
+    havoladan pack nomini ajratib oladi."""
+    if not text:
+        return None
+    for marker in ("addstickers/", "addemoji/"):
+        if marker in text:
+            after = text.split(marker, 1)[1]
+            # so'zdan keyingi bo'sh joy/qo'shimcha belgilarni kesib tashlaymiz
+            name = after.split()[0] if after.split() else after
+            name = name.strip("/?").split("?")[0]
+            if name:
+                return name
+    return None
+
+
 def extract_pack_name_from_message(msg):
     """Forward qilingan sticker/custom emoji xabaridan pack nomini topadi."""
+    # 1) Oddiy sticker (forward qilingan)
     sticker = msg.get("sticker")
     if sticker and sticker.get("set_name"):
         return sticker["set_name"]
+
+    # 2) Custom emoji — matn/caption ichidagi entity sifatida keladi
+    for field, entity_field in (("text", "entities"), ("caption", "caption_entities")):
+        content = msg.get(field)
+        entities = msg.get(entity_field) or []
+        for ent in entities:
+            if ent.get("type") == "custom_emoji" and ent.get("custom_emoji_id"):
+                set_name = get_custom_emoji_set_name(ent["custom_emoji_id"])
+                if set_name:
+                    return set_name
+
+    # 3) Matn ichida t.me/addstickers/... yoki t.me/addemoji/... havolasi bo'lsa
+    link_name = extract_pack_name_from_link(msg.get("text"))
+    if link_name:
+        return link_name
+
     return None
 
 
@@ -189,7 +230,8 @@ def webhook():
         if len(parts) < 2:
             send_message(chat_id, "Foydalanish: /getpack pack_nomi")
             return {"ok": True}
-        pack_name = parts[1].strip()
+        raw = parts[1].strip()
+        pack_name = extract_pack_name_from_link(raw) or raw
         handle_pack_request(chat_id, pack_name, requester_info)
         return {"ok": True}
 
