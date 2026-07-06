@@ -213,6 +213,9 @@ def set_webhook():
     log.info("Webhook o'rnatildi: %s -> %s", url, result)
 
 
+# Gunicorn faylni import qilganda ham webhook o'rnatilishi uchun
+# shu qatorni modul darajasida chaqiramiz (faqat __main__ ichida emas).
+set_webhook()
+
 if __name__ == "__main__":
-    set_webhook()
     app.run(host="0.0.0.0", port=PORT)
