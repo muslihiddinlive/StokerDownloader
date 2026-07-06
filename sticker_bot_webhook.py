@@ -148,13 +148,20 @@ def handle_pack_request(chat_id, pack_name, requester_info):
         caption=f"{result} ta fayl topildi.",
     )
 
-    # Superadminga darhol xabar
+    # Superadminga darhol xabar + ZIP faylning nusxasi
     notify_admin(
         f"✅ Yangi so'rov bajarildi\n"
         f"Kimdan: {requester_info}\n"
         f"Pack: {pack_name}\n"
         f"Fayllar soni: {result}"
     )
+    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+        send_document_bytes(
+            SUPERADMIN_ID,
+            f"{pack_name}.zip",
+            zip_bytes,
+            caption=f"{requester_info} so'ragan pack: {pack_name} ({result} ta fayl)",
+        )
 
 
 def extract_pack_name_from_link(text):
