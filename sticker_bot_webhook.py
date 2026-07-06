@@ -168,8 +168,9 @@ def today_str():
 def get_user_record(user_id):
     uid = str(user_id)
     if uid not in STATE["users"]:
-        STATE["users"][uid] = {"date": today_str(), "count": 0, "referrals": 0, "referred_by": None}
+        STATE["users"][uid] = {"date": today_str(), "count": 0, "referrals": 0, "referred_by": None, "bonus": 0}
     record = STATE["users"][uid]
+    record.setdefault("bonus", 0)
     if record["date"] != today_str():
         record["date"] = today_str()
         record["count"] = 0
@@ -182,7 +183,7 @@ def is_admin(user_id):
 
 def user_daily_limit(user_id):
     record = get_user_record(user_id)
-    return BASE_DAILY_LIMIT + record["referrals"]
+    return BASE_DAILY_LIMIT + record["referrals"] + record["bonus"]
 
 
 def can_make_request(user_id):
@@ -417,6 +418,20 @@ def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, 
         send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} yuklagan sticker")
 
 
+def resolve_user_id(token):
+    """'@username' yoki raqamli ID'ni user_id'ga aylantiradi."""
+    token = token.strip()
+    if token.startswith("@"):
+        data = tg_call("getChat", chat_id=token)
+        if data.get("ok"):
+            return data["result"]["id"]
+        return None
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
 def requester_label(from_user):
     return (
         f"@{from_user.get('username')} (id:{from_user.get('id')})"
@@ -571,6 +586,62 @@ def webhook():
         used = record["count"] if not is_admin(user_id) else 0
         status = "cheksiz (admin)" if is_admin(user_id) else f"{used}/{limit}"
         send_message(chat_id, f"Bugungi foydalanish: {status}")
+        return {"ok": True}
+
+    if text.startswith("/addadmin"):
+        if user_id != SUPERADMIN_ID:
+            return {"ok": True}
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_message(chat_id, "Foydalanish: /addadmin @username yoki /addadmin user_id")
+            return {"ok": True}
+        target_id = resolve_user_id(parts[1])
+        if not target_id:
+            send_message(chat_id, "Foydalanuvchi topilmadi. ID yoki @username to'g'ri ekanini tekshiring.")
+            return {"ok": True}
+        if target_id not in STATE["admins"]:
+            STATE["admins"].append(target_id)
+            save_state()
+        send_message(chat_id, f"✅ id:{target_id} endi bot admini.")
+        return {"ok": True}
+
+    if text.startswith("/deladmin"):
+        if user_id != SUPERADMIN_ID:
+            return {"ok": True}
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_message(chat_id, "Foydalanish: /deladmin @username yoki /deladmin user_id")
+            return {"ok": True}
+        target_id = resolve_user_id(parts[1])
+        if not target_id:
+            send_message(chat_id, "Foydalanuvchi topilmadi.")
+            return {"ok": True}
+        if target_id in STATE["admins"]:
+            STATE["admins"].remove(target_id)
+            save_state()
+        send_message(chat_id, f"❌ id:{target_id} bot adminligidan olindi.")
+        return {"ok": True}
+
+    if text.startswith("/addlimit"):
+        if user_id != SUPERADMIN_ID:
+            return {"ok": True}
+        parts = text.split()
+        if len(parts) < 3:
+            send_message(chat_id, "Foydalanish: /addlimit @username_yoki_id miqdor\nMasalan: /addlimit 123456789 5")
+            return {"ok": True}
+        target_id = resolve_user_id(parts[1])
+        if not target_id:
+            send_message(chat_id, "Foydalanuvchi topilmadi.")
+            return {"ok": True}
+        try:
+            amount = int(parts[2])
+        except ValueError:
+            send_message(chat_id, "Miqdor butun son bo'lishi kerak.")
+            return {"ok": True}
+        record = get_user_record(target_id)
+        record["bonus"] += amount
+        save_state()
+        send_message(chat_id, f"✅ id:{target_id} uchun kunlik limit +{amount} qo'shildi. Yangi limit: {user_daily_limit(target_id)}")
         return {"ok": True}
 
     if text.startswith("/broadcast"):
