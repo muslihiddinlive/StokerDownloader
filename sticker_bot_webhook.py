@@ -32,6 +32,7 @@ import io
 import json
 import zipfile
 import logging
+import threading
 from datetime import datetime, timezone
 
 from flask import Flask, request
@@ -56,6 +57,7 @@ app = Flask(__name__)
 BOT_ID = None          # getMe orqali to'ldiriladi
 BOT_USERNAME = None
 _pinned_message_id = None  # DB pinned xabar ID keshi
+_state_lock = threading.Lock()  # Fon oqimlar bir vaqtda STATE'ni yozib yubormasligi uchun
 
 
 # ---------- Telegram API helper funksiyalar ----------
@@ -68,13 +70,92 @@ def tg_call(method, **params):
     return data
 
 
-def send_message(chat_id, text, reply_to=None, parse_mode_html=False):
+def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_markup=None):
     params = {"chat_id": chat_id, "text": text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
     if parse_mode_html:
         params["parse_mode"] = "HTML"
+    if reply_markup:
+        params["reply_markup"] = reply_markup
     return tg_call("sendMessage", **params)
+
+
+def edit_message_text(chat_id, message_id, text, parse_mode_html=False, reply_markup=None):
+    params = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if parse_mode_html:
+        params["parse_mode"] = "HTML"
+    if reply_markup:
+        params["reply_markup"] = reply_markup
+    return tg_call("editMessageText", **params)
+
+
+def answer_callback_query(callback_query_id, text=None, show_alert=False):
+    params = {"callback_query_id": callback_query_id}
+    if text:
+        params["text"] = text
+        params["show_alert"] = show_alert
+    return tg_call("answerCallbackQuery", **params)
+
+
+def main_menu_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "📦 Pack yuklab olish", "callback_data": "menu_getpack"}],
+            [
+                {"text": "🔗 Referal", "callback_data": "menu_ref"},
+                {"text": "📊 Limitim", "callback_data": "menu_limit"},
+            ],
+            [{"text": "❓ Yordam", "callback_data": "menu_help"}],
+        ]
+    }
+
+
+def back_to_menu_keyboard():
+    return {"inline_keyboard": [[{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}]]}
+
+
+def build_help_text(user_id):
+    cfg = get_limit_config()
+    base = cfg["base_weekly"]
+    weekly_cap = cfg["weekly_cap"]
+    help_text = (
+        "📋 <b>Buyruqlar ro'yxati</b>\n\n"
+        "👤 <b>Hammaga:</b>\n"
+        "/start — botni ishga tushirish\n"
+        "/getpack <pack_nomi> — pack'ni ZIP qilib olish\n"
+        "(yoki sticker/custom emoji'ni to'g'ridan-to'g'ri forward qiling)\n"
+        "/ref — referal havolangiz va hozirgi limitingiz\n"
+        "/limit — bugungi/shu haftadagi foydalanishingiz\n"
+        "/help — shu xabar\n\n"
+        "⚙️ <b>Limit qoidalari:</b>\n"
+        f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
+        f"• Har bir referal haftalik imkoniyatingizni +1 taga oshiradi "
+        f"({base} → {base + 1} → {base + 2} → ... → {weekly_cap}).\n"
+        f"• Imkoniyatlar {weekly_cap} taga (kuniga 1 martaga teng) yetganda, "
+        f"tizim HAFTALIKdan KUNLIKka o'tadi.\n"
+        f"• Shundan keyingi HAR BIR qo'shimcha referal kunlik limitingizni "
+        f"2 baravar oshiradi (1 → 2 → 4 → 8 ...).\n"
+        "• Adminlar uchun limit yo'q.\n\n"
+    )
+    if is_admin(user_id):
+        help_text += (
+            "🛠 <b>Admin/Superadmin buyruqlari:</b>\n"
+            "/addadmin @username yoki user_id — admin qo'shish (superadmin)\n"
+            "/deladmin @username yoki user_id — adminlikdan olish (superadmin)\n"
+            "/addlimit @username_yoki_id miqdor — foydalanuvchiga qo'shimcha bonus limit berish (superadmin)\n"
+            "/setbaselimit son — referalsiz foydalanuvchilar uchun haftalik bazaviy limitni o'zgartirish (superadmin)\n"
+            "/setweeklycap son — haftalik imkoniyat qaysi songa yetganda kunlikka o'tishini belgilash (superadmin)\n"
+            "/broadcast xabar — barcha foydalanuvchilarga xabar yuborish (superadmin)\n"
+            "/reload — DB'ni guruhdan qayta yuklash (superadmin)\n\n"
+            "👥 <b>Guruhda (reply orqali, nuqta bilan boshlanadi):</b>\n"
+            ".zip — reply qilingan xabardagi pack'ni ZIP qilib berish\n"
+            ".zipstiker — reply qilingan bitta sticker/emoji'ni yuklab berish\n"
+            ".addadmin — reply qilingan odamni admin qilish (superadmin)\n"
+            ".deladmin — reply qilingan odamni adminlikdan olish (superadmin)\n"
+            ".del — reply qilingan xabarni o'chirish (superadmin)\n"
+        )
+    return help_text
 
 
 def send_document_bytes(chat_id, filename, file_bytes, caption=None):
@@ -82,7 +163,15 @@ def send_document_bytes(chat_id, filename, file_bytes, caption=None):
     payload = {"chat_id": chat_id}
     if caption:
         payload["caption"] = caption
-    requests.post(f"{API_BASE}/sendDocument", data=payload, files=files, timeout=60)
+    resp = requests.post(f"{API_BASE}/sendDocument", data=payload, files=files, timeout=60)
+    try:
+        data = resp.json()
+    except ValueError:
+        log.error("sendDocument javobi JSON emas: %s", resp.text[:300])
+        return None
+    if not data.get("ok"):
+        log.error("sendDocument xato: %s", data)
+    return data
 
 
 def notify_admin(text):
@@ -148,26 +237,27 @@ STATE = load_state()
 
 def save_state():
     global _pinned_message_id
-    text = json.dumps(STATE, ensure_ascii=False)
-    if _pinned_message_id:
-        result = tg_call(
-            "editMessageText",
-            chat_id=DB_GROUP_ID,
-            message_id=_pinned_message_id,
-            text=text,
-        )
+    with _state_lock:
+        text = json.dumps(STATE, ensure_ascii=False)
+        if _pinned_message_id:
+            result = tg_call(
+                "editMessageText",
+                chat_id=DB_GROUP_ID,
+                message_id=_pinned_message_id,
+                text=text,
+            )
+            if result.get("ok"):
+                return
+        # Pinned xabar yo'q yoki edit muvaffaqiyatsiz — yangisini yuboramiz
+        result = tg_call("sendMessage", chat_id=DB_GROUP_ID, text=text)
         if result.get("ok"):
-            return
-    # Pinned xabar yo'q yoki edit muvaffaqiyatsiz — yangisini yuboramiz
-    result = tg_call("sendMessage", chat_id=DB_GROUP_ID, text=text)
-    if result.get("ok"):
-        _pinned_message_id = result["result"]["message_id"]
-        tg_call(
-            "pinChatMessage",
-            chat_id=DB_GROUP_ID,
-            message_id=_pinned_message_id,
-            disable_notification=True,
-        )
+            _pinned_message_id = result["result"]["message_id"]
+            tg_call(
+                "pinChatMessage",
+                chat_id=DB_GROUP_ID,
+                message_id=_pinned_message_id,
+                disable_notification=True,
+            )
 
 
 def today_str():
@@ -372,6 +462,16 @@ def process_pack(pack_name):
 
 
 def handle_pack_request(chat_id, pack_name, requester_info, requester_id, reply_to=None):
+    """Webhook so'rovini darhol bo'shatish uchun fon oqimida ishlaydi
+    (Telegram webhook timeout / qayta-yuborishning oldini olish uchun)."""
+    threading.Thread(
+        target=_handle_pack_request_sync,
+        args=(chat_id, pack_name, requester_info, requester_id, reply_to),
+        daemon=True,
+    ).start()
+
+
+def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, reply_to=None):
     allowed, reason = can_make_request(requester_id)
     if not allowed:
         send_message(chat_id, reason, reply_to=reply_to)
@@ -467,6 +567,15 @@ def extract_single_sticker_file(msg):
 
 
 def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None):
+    """Fon oqimida ishlaydi (webhook darhol javob qaytarishi uchun)."""
+    threading.Thread(
+        target=_handle_single_sticker_request_sync,
+        args=(chat_id, reply, requester_info, requester_id, reply_to),
+        daemon=True,
+    ).start()
+
+
+def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requester_id, reply_to=None):
     allowed, reason = can_make_request(requester_id)
     if not allowed:
         send_message(chat_id, reason, reply_to=reply_to)
@@ -584,11 +693,105 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
     return False
 
 
+# ---------- Inline menyu (callback_query) ----------
+
+def handle_callback_query(cq):
+    cq_id = cq["id"]
+    data = cq.get("data", "")
+    from_user = cq.get("from", {})
+    user_id = from_user.get("id")
+    message = cq.get("message") or {}
+    chat_id = message.get("chat", {}).get("id")
+    message_id = message.get("message_id")
+
+    if chat_id is None or message_id is None:
+        answer_callback_query(cq_id)
+        return
+
+    register_known_user(user_id)
+
+    if data == "menu_home":
+        answer_callback_query(cq_id)
+        edit_message_text(
+            chat_id,
+            message_id,
+            "Salom! Menga sticker/custom emoji forward qiling yoki "
+            "/getpack <pack_nomi> deb yozing — men barcha fayllarni ZIP qilib beraman.\n\n"
+            "Quyidagi tugmalardan ham foydalanishingiz mumkin 👇",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if data == "menu_getpack":
+        answer_callback_query(cq_id)
+        edit_message_text(
+            chat_id,
+            message_id,
+            "📦 Pack yuklab olish uchun:\n\n"
+            "• <code>/getpack pack_nomi</code> deb yozing, YOKI\n"
+            "• pack ichidagi istalgan bitta sticker/custom emoji'ni menga forward qiling.\n\n"
+            "Pack nomini uning ulashish havolasidan ham olsangiz bo'ladi "
+            "(masalan t.me/addstickers/<b>pack_nomi</b>).",
+            parse_mode_html=True,
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    if data == "menu_ref":
+        answer_callback_query(cq_id)
+        link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+        record = get_user_record(user_id)
+        mode, limit = ensure_period_reset(user_id)
+        save_state()
+        period = "kunlik" if mode == "daily" else "haftalik"
+        edit_message_text(
+            chat_id,
+            message_id,
+            f"🔗 Referal havolangiz:\n{link}\n\n"
+            f"Hozirgi referallar: {record['referrals']}\n"
+            f"Yangi {period} limitingiz: {limit} ta.",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    if data == "menu_limit":
+        answer_callback_query(cq_id)
+        if is_admin(user_id):
+            text = "📊 Foydalanishingiz: cheksiz (admin)"
+        else:
+            mode, limit = ensure_period_reset(user_id)
+            save_state()
+            record = get_user_record(user_id)
+            period_label = "Bugungi" if mode == "daily" else "Shu haftadagi"
+            text = f"📊 {period_label} foydalanish: {record['count']}/{limit}"
+        edit_message_text(chat_id, message_id, text, reply_markup=back_to_menu_keyboard())
+        return
+
+    if data == "menu_help":
+        answer_callback_query(cq_id)
+        edit_message_text(
+            chat_id,
+            message_id,
+            build_help_text(user_id),
+            parse_mode_html=True,
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    answer_callback_query(cq_id)
+
+
 # ---------- Webhook endpoint ----------
 
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = request.get_json(force=True)
+
+    # ---- Inline tugma bosilishi (callback_query) ----
+    callback_query = update.get("callback_query")
+    if callback_query:
+        handle_callback_query(callback_query)
+        return {"ok": True}
 
     # ---- Kanal postlari: bot admin bo'lsa avtomatik reaksiya ----
     channel_post = update.get("channel_post")
@@ -644,51 +847,13 @@ def webhook():
             chat_id,
             "Salom! Menga sticker/custom emoji forward qiling yoki "
             "/getpack <pack_nomi> deb yozing — men barcha fayllarni ZIP qilib beraman.\n\n"
-            "Batafsil qoidalar va buyruqlar ro'yxati uchun /help yozing.",
+            "Quyidagi tugmalardan ham foydalanishingiz mumkin 👇",
+            reply_markup=main_menu_keyboard(),
         )
         return {"ok": True}
 
     if text.startswith("/help"):
-        cfg = get_limit_config()
-        base = cfg["base_weekly"]
-        weekly_cap = cfg["weekly_cap"]
-        help_text = (
-            "📋 <b>Buyruqlar ro'yxati</b>\n\n"
-            "👤 <b>Hammaga:</b>\n"
-            "/start — botni ishga tushirish\n"
-            "/getpack <pack_nomi> — pack'ni ZIP qilib olish\n"
-            "(yoki sticker/custom emoji'ni to'g'ridan-to'g'ri forward qiling)\n"
-            "/ref — referal havolangiz va hozirgi limitingiz\n"
-            "/limit — bugungi/shu haftadagi foydalanishingiz\n"
-            "/help — shu xabar\n\n"
-            "⚙️ <b>Limit qoidalari:</b>\n"
-            f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
-            f"• Har bir referal haftalik imkoniyatingizni +1 taga oshiradi "
-            f"({base} → {base + 1} → {base + 2} → ... → {weekly_cap}).\n"
-            f"• Imkoniyatlar {weekly_cap} taga (kuniga 1 martaga teng) yetganda, "
-            f"tizim HAFTALIKdan KUNLIKka o'tadi.\n"
-            f"• Shundan keyingi HAR BIR qo'shimcha referal kunlik limitingizni "
-            f"2 baravar oshiradi (1 → 2 → 4 → 8 ...).\n"
-            "• Adminlar uchun limit yo'q.\n\n"
-        )
-        if is_admin(user_id):
-            help_text += (
-                "🛠 <b>Admin/Superadmin buyruqlari:</b>\n"
-                "/addadmin @username yoki user_id — admin qo'shish (superadmin)\n"
-                "/deladmin @username yoki user_id — adminlikdan olish (superadmin)\n"
-                "/addlimit @username_yoki_id miqdor — foydalanuvchiga qo'shimcha bonus limit berish (superadmin)\n"
-                "/setbaselimit son — referalsiz foydalanuvchilar uchun haftalik bazaviy limitni o'zgartirish (superadmin)\n"
-                "/setweeklycap son — haftalik imkoniyat qaysi songa yetganda kunlikka o'tishini belgilash (superadmin)\n"
-                "/broadcast xabar — barcha foydalanuvchilarga xabar yuborish (superadmin)\n"
-                "/reload — DB'ni guruhdan qayta yuklash (superadmin)\n\n"
-                "👥 <b>Guruhda (reply orqali, nuqta bilan boshlanadi):</b>\n"
-                ".zip — reply qilingan xabardagi pack'ni ZIP qilib berish\n"
-                ".zipstiker — reply qilingan bitta sticker/emoji'ni yuklab berish\n"
-                ".addadmin — reply qilingan odamni admin qilish (superadmin)\n"
-                ".deladmin — reply qilingan odamni adminlikdan olish (superadmin)\n"
-                ".del — reply qilingan xabarni o'chirish (superadmin)\n"
-            )
-        send_message(chat_id, help_text, parse_mode_html=True)
+        send_message(chat_id, build_help_text(user_id), parse_mode_html=True, reply_markup=back_to_menu_keyboard())
         return {"ok": True}
 
     if text.startswith("/ref"):
