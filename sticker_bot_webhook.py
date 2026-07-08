@@ -123,7 +123,7 @@ def build_help_text(user_id):
         "📋 <b>Buyruqlar ro'yxati</b>\n\n"
         "👤 <b>Hammaga:</b>\n"
         "/start — botni ishga tushirish\n"
-        "/getpack <pack_nomi> — pack'ni ZIP qilib olish\n"
+        "/getpack &lt;pack_nomi&gt; — pack'ni ZIP qilib olish\n"
         "(yoki sticker/custom emoji'ni to'g'ridan-to'g'ri forward qiling)\n"
         "/ref — referal havolangiz va hozirgi limitingiz\n"
         "/limit — bugungi/shu haftadagi foydalanishingiz\n"
@@ -140,20 +140,24 @@ def build_help_text(user_id):
     )
     if is_admin(user_id):
         help_text += (
-            "🛠 <b>Admin/Superadmin buyruqlari:</b>\n"
-            "/addadmin @username yoki user_id — admin qo'shish (superadmin)\n"
-            "/deladmin @username yoki user_id — adminlikdan olish (superadmin)\n"
-            "/addlimit @username_yoki_id miqdor — foydalanuvchiga qo'shimcha bonus limit berish (superadmin)\n"
-            "/setbaselimit son — referalsiz foydalanuvchilar uchun haftalik bazaviy limitni o'zgartirish (superadmin)\n"
-            "/setweeklycap son — haftalik imkoniyat qaysi songa yetganda kunlikka o'tishini belgilash (superadmin)\n"
-            "/broadcast xabar — barcha foydalanuvchilarga xabar yuborish (superadmin)\n"
-            "/reload — DB'ni guruhdan qayta yuklash (superadmin)\n\n"
+            "🛠 <b>Admin buyruqlari:</b>\n"
+            "/broadcast xabar — barcha foydalanuvchilarga xabar yuborish\n\n"
             "👥 <b>Guruhda (reply orqali, nuqta bilan boshlanadi):</b>\n"
             ".zip — reply qilingan xabardagi pack'ni ZIP qilib berish\n"
             ".zipstiker — reply qilingan bitta sticker/emoji'ni yuklab berish\n"
-            ".addadmin — reply qilingan odamni admin qilish (superadmin)\n"
-            ".deladmin — reply qilingan odamni adminlikdan olish (superadmin)\n"
-            ".del — reply qilingan xabarni o'chirish (superadmin)\n"
+        )
+    if user_id == SUPERADMIN_ID:
+        help_text += (
+            "\n👑 <b>Faqat superadmin uchun:</b>\n"
+            "/addadmin @username yoki user_id — admin qo'shish\n"
+            "/deladmin @username yoki user_id — adminlikdan olish\n"
+            "/addlimit @username_yoki_id miqdor — foydalanuvchiga qo'shimcha bonus limit berish\n"
+            "/setbaselimit son — referalsiz foydalanuvchilar uchun haftalik bazaviy limitni o'zgartirish\n"
+            "/setweeklycap son — haftalik imkoniyat qaysi songa yetganda kunlikka o'tishini belgilash\n"
+            "/reload — DB'ni guruhdan qayta yuklash\n"
+            ".addadmin — reply qilingan odamni admin qilish (guruhda)\n"
+            ".deladmin — reply qilingan odamni adminlikdan olish (guruhda)\n"
+            ".del — reply qilingan xabarni o'chirish (guruhda)\n"
         )
     return help_text
 
@@ -212,9 +216,28 @@ def default_state():
         "users": {},
         "known_users": [],
         # Superadmin sozlashi mumkin bo'lgan limit konfiguratsiyasi:
-        #   base_weekly  - referalsiz foydalanuvchi uchun haftalik imkoniyatlar soni (default: 1)
+        #   base_weekly  - referalsiz foydalanuvchi uchun haftalik imkoniyatlar soni (default: 7)
         #   weekly_cap   - haftalik imkoniyatlar shu songa yetganda tizim "kunlik" rejimga o'tadi (default: 7)
-        "config": {"base_weekly": 1, "weekly_cap": 7},
+        "config": {"base_weekly": 7, "weekly_cap": 7},
+        # Majburiy kanal/guruhlar — superadmin cheksiz sonda qo'sha oladi.
+        # Foydalanuvchi shaxsiy chatda botdan foydalanishdan oldin ularga a'zo bo'lishi shart.
+        "force_channels": [],  # [{"chat_id": int, "title": str, "username": str|None}]
+        # Bonus kanallar — majburiy emas, lekin a'zo bo'lgan (va tasdiqlagan)
+        # foydalanuvchiga bir martalik +2 limit beriladi.
+        "bonus_channels": [],  # [{"chat_id": int, "title": str, "username": str|None}]
+    }
+
+
+def default_user_record():
+    return {
+        "period_key": None,
+        "mode": None,
+        "count": 0,
+        "referrals": 0,
+        "referred_by": None,
+        "bonus": 0,
+        "premium_until": None,  # UNIX timestamp (UTC) — Stars orqali xarid qilingan cheksiz muddat
+        "claimed_bonus_channels": [],  # bonus olingan kanal chat_id'lari (qayta olinmasligi uchun)
     }
 
 
@@ -272,31 +295,117 @@ def iso_week_str():
 def get_limit_config():
     STATE.setdefault("config", {})
     cfg = STATE["config"]
-    cfg.setdefault("base_weekly", 1)
+    cfg.setdefault("base_weekly", 7)
     cfg.setdefault("weekly_cap", 7)
     return cfg
+
+
+def get_force_channels():
+    STATE.setdefault("force_channels", [])
+    return STATE["force_channels"]
+
+
+def get_bonus_channels():
+    STATE.setdefault("bonus_channels", [])
+    return STATE["bonus_channels"]
 
 
 def get_user_record(user_id):
     uid = str(user_id)
     if uid not in STATE["users"]:
-        STATE["users"][uid] = {
-            "period_key": None,
-            "mode": None,
-            "count": 0,
-            "referrals": 0,
-            "referred_by": None,
-            "bonus": 0,
-        }
+        STATE["users"][uid] = default_user_record()
     record = STATE["users"][uid]
-    # Eski (v1) yozuvlar bilan moslik uchun:
-    record.setdefault("bonus", 0)
-    record.setdefault("referrals", 0)
-    record.setdefault("referred_by", None)
-    record.setdefault("period_key", None)
-    record.setdefault("mode", None)
-    record.setdefault("count", 0)
+    # Eski yozuvlar bilan moslik uchun:
+    defaults = default_user_record()
+    for key, value in defaults.items():
+        record.setdefault(key, value)
     return record
+
+
+def is_premium(user_id):
+    record = get_user_record(user_id)
+    until = record.get("premium_until")
+    if not until:
+        return False
+    return datetime.now(timezone.utc).timestamp() < until
+
+
+def grant_premium(user_id, days=182):
+    """Stars orqali xarid qilingandan keyin cheksiz muddatni yoqadi (default ~6 oy)."""
+    record = get_user_record(user_id)
+    now = datetime.now(timezone.utc).timestamp()
+    current_until = record.get("premium_until") or now
+    base = max(now, current_until)
+    record["premium_until"] = base + days * 86400
+    save_state()
+    return record["premium_until"]
+
+
+# ---------- Rol asosidagi "/" buyruqlar menyusi (setMyCommands) ----------
+# BotFather orqali qo'lda sozlash o'rniga — har bir foydalanuvchi guruhiga
+# (oddiy/admin/superadmin) mos ro'yxat avtomatik ko'rsatiladi.
+
+USER_COMMANDS = [
+    ("start", "Botni ishga tushirish"),
+    ("getpack", "Pack'ni ZIP qilib olish"),
+    ("ref", "Referal havolangiz va limitingiz"),
+    ("limit", "Joriy foydalanishingiz"),
+    ("help", "Yordam va buyruqlar ro'yxati"),
+]
+
+ADMIN_EXTRA_COMMANDS = [
+    ("broadcast", "Barcha foydalanuvchilarga xabar yuborish"),
+]
+
+SUPERADMIN_EXTRA_COMMANDS = [
+    ("addadmin", "Admin qo'shish"),
+    ("deladmin", "Adminlikdan olish"),
+    ("addlimit", "Foydalanuvchiga bonus limit berish"),
+    ("setbaselimit", "Haftalik bazaviy limitni o'zgartirish"),
+    ("setweeklycap", "Kunlikka o'tish chegarasini belgilash"),
+    ("reload", "DB'ni guruhdan qayta yuklash"),
+]
+
+
+def _commands_payload(commands):
+    return [{"command": name, "description": desc} for name, desc in commands]
+
+
+def set_default_commands():
+    """Hech qanday maxsus scope'i bo'lmagan barcha foydalanuvchilar uchun bazaviy ro'yxat."""
+    tg_call("setMyCommands", commands=_commands_payload(USER_COMMANDS))
+
+
+def set_chat_commands(chat_id, commands):
+    """Muayyan foydalanuvchi (chat_id) uchun kengaytirilgan buyruqlar ro'yxatini o'rnatadi."""
+    tg_call(
+        "setMyCommands",
+        commands=_commands_payload(commands),
+        scope={"type": "chat", "chat_id": chat_id},
+    )
+
+
+def reset_chat_commands(chat_id):
+    """Foydalanuvchini bazaviy (default) ro'yxatga qaytaradi (masalan, admin olib tashlanganda)."""
+    tg_call("deleteMyCommands", scope={"type": "chat", "chat_id": chat_id})
+
+
+def sync_role_commands(user_id):
+    """user_id'ning joriy roliga qarab uning shaxsiy chatidagi '/' menyusini yangilaydi."""
+    if user_id == SUPERADMIN_ID:
+        set_chat_commands(user_id, USER_COMMANDS + ADMIN_EXTRA_COMMANDS + SUPERADMIN_EXTRA_COMMANDS)
+    elif user_id in STATE["admins"]:
+        set_chat_commands(user_id, USER_COMMANDS + ADMIN_EXTRA_COMMANDS)
+    else:
+        reset_chat_commands(user_id)
+
+
+def sync_all_role_commands():
+    """Bot ishga tushganda superadmin va barcha adminlar uchun menyularni qayta o'rnatadi."""
+    set_default_commands()
+    sync_role_commands(SUPERADMIN_ID)
+    for admin_id in STATE.get("admins", []):
+        sync_role_commands(admin_id)
 
 
 def is_admin(user_id):
@@ -946,6 +1055,7 @@ def webhook():
         if target_id not in STATE["admins"]:
             STATE["admins"].append(target_id)
             save_state()
+        sync_role_commands(target_id)
         send_message(chat_id, f"✅ id:{target_id} endi bot admini.")
         return {"ok": True}
 
@@ -963,6 +1073,7 @@ def webhook():
         if target_id in STATE["admins"]:
             STATE["admins"].remove(target_id)
             save_state()
+        sync_role_commands(target_id)
         send_message(chat_id, f"❌ id:{target_id} bot adminligidan olindi.")
         return {"ok": True}
 
@@ -992,7 +1103,7 @@ def webhook():
         return {"ok": True}
 
     if text.startswith("/broadcast"):
-        if user_id != SUPERADMIN_ID:
+        if not is_admin(user_id):
             return {"ok": True}
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -1059,6 +1170,7 @@ def init_bot_identity():
 # Gunicorn faylni import qilganda ham ishga tushishi uchun modul darajasida:
 init_bot_identity()
 set_webhook()
+sync_all_role_commands()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
