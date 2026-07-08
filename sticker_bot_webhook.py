@@ -49,7 +49,6 @@ PORT = int(os.environ.get("PORT", 10000))
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 FILE_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
-BASE_DAILY_LIMIT = 1
 REACTION_EMOJI = "⚡"
 
 app = Flask(__name__)
@@ -69,10 +68,12 @@ def tg_call(method, **params):
     return data
 
 
-def send_message(chat_id, text, reply_to=None):
+def send_message(chat_id, text, reply_to=None, parse_mode_html=False):
     params = {"chat_id": chat_id, "text": text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
+    if parse_mode_html:
+        params["parse_mode"] = "HTML"
     return tg_call("sendMessage", **params)
 
 
@@ -117,7 +118,15 @@ def bot_is_group_admin(chat_id):
 # ---------- DB (Telegram guruh + pinned xabar orqali) ----------
 
 def default_state():
-    return {"admins": [], "users": {}, "known_users": []}
+    return {
+        "admins": [],
+        "users": {},
+        "known_users": [],
+        # Superadmin sozlashi mumkin bo'lgan limit konfiguratsiyasi:
+        #   base_weekly  - referalsiz foydalanuvchi uchun haftalik imkoniyatlar soni (default: 1)
+        #   weekly_cap   - haftalik imkoniyatlar shu songa yetganda tizim "kunlik" rejimga o'tadi (default: 7)
+        "config": {"base_weekly": 1, "weekly_cap": 7},
+    }
 
 
 def load_state():
@@ -165,15 +174,38 @@ def today_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def iso_week_str():
+    # ISO-8601 hafta identifikatori, masalan "2026-W28"
+    return datetime.now(timezone.utc).strftime("%G-W%V")
+
+
+def get_limit_config():
+    STATE.setdefault("config", {})
+    cfg = STATE["config"]
+    cfg.setdefault("base_weekly", 1)
+    cfg.setdefault("weekly_cap", 7)
+    return cfg
+
+
 def get_user_record(user_id):
     uid = str(user_id)
     if uid not in STATE["users"]:
-        STATE["users"][uid] = {"date": today_str(), "count": 0, "referrals": 0, "referred_by": None, "bonus": 0}
+        STATE["users"][uid] = {
+            "period_key": None,
+            "mode": None,
+            "count": 0,
+            "referrals": 0,
+            "referred_by": None,
+            "bonus": 0,
+        }
     record = STATE["users"][uid]
+    # Eski (v1) yozuvlar bilan moslik uchun:
     record.setdefault("bonus", 0)
-    if record["date"] != today_str():
-        record["date"] = today_str()
-        record["count"] = 0
+    record.setdefault("referrals", 0)
+    record.setdefault("referred_by", None)
+    record.setdefault("period_key", None)
+    record.setdefault("mode", None)
+    record.setdefault("count", 0)
     return record
 
 
@@ -181,21 +213,64 @@ def is_admin(user_id):
     return user_id == SUPERADMIN_ID or user_id in STATE["admins"]
 
 
-def user_daily_limit(user_id):
+def compute_user_limit(user_id):
+    """
+    Limit mantig'i:
+      - Referalsiz: haftasiga `base_weekly` marta (default 1/hafta).
+      - Har bir referal haftalik imkoniyatni +1 qiladi: 1 -> 2 -> 3 -> ... -> weekly_cap.
+      - Imkoniyatlar soni `weekly_cap`ga (default 7, ya'ni har kuni 1 marta) yetganda,
+        tizim HAFTALIKdan KUNLIKka o'tadi (kunlik 1 marta).
+      - Shundan keyingi HAR BIR qo'shimcha referal kunlik limitni 2 baravar oshiradi
+        (1 -> 2 -> 4 -> 8 -> ...).
+      - Superadmin bergan qo'shimcha bonus (/addlimit) ustiga qo'shiladi.
+    Qaytaradi: (mode, limit) bu yerda mode "weekly" yoki "daily".
+    """
     record = get_user_record(user_id)
-    return BASE_DAILY_LIMIT + record["referrals"] + record["bonus"]
+    cfg = get_limit_config()
+    base = cfg["base_weekly"]
+    weekly_cap = cfg["weekly_cap"]
+    referrals = record["referrals"]
+    threshold = max(0, weekly_cap - base)  # kunlik rejimga o'tish uchun kerak bo'lgan referallar soni
+
+    slots = base + referrals
+    if slots < weekly_cap:
+        mode = "weekly"
+        limit = slots
+    else:
+        mode = "daily"
+        extra = max(0, referrals - threshold)
+        limit = 2 ** extra  # har qo'shimcha referal uchun 2x
+
+    limit += record.get("bonus", 0)
+    return mode, max(1, limit)
+
+
+def ensure_period_reset(user_id):
+    """Foydalanuvchi rejimi (haftalik/kunlik) o'zgargan yoki davr (hafta/kun) yangilangan bo'lsa, hisoblagichni nolga tushiradi."""
+    record = get_user_record(user_id)
+    mode, limit = compute_user_limit(user_id)
+    key = today_str() if mode == "daily" else iso_week_str()
+    if record.get("mode") != mode or record.get("period_key") != key:
+        record["mode"] = mode
+        record["period_key"] = key
+        record["count"] = 0
+    return mode, limit
+
+
+def limit_period_label(mode):
+    return "bugun" if mode == "daily" else "shu hafta"
 
 
 def can_make_request(user_id):
     if is_admin(user_id):
         return True, None
     record = get_user_record(user_id)
-    limit = user_daily_limit(user_id)
+    mode, limit = ensure_period_reset(user_id)
     if record["count"] >= limit:
+        period = "kunlik" if mode == "daily" else "haftalik"
         return False, (
-            f"Kunlik limitingiz tugadi ({limit}/{limit}).\n"
-            f"Limitni oshirish uchun /ref orqali do'stlaringizni taklif qiling — "
-            f"har bir referal +1 kunlik limit beradi."
+            f"{period.capitalize()} limitingiz tugadi ({limit}/{limit}, {limit_period_label(mode)}).\n"
+            f"Limitni oshirish uchun /ref orqali do'stlaringizni taklif qiling."
         )
     return True, None
 
@@ -203,6 +278,7 @@ def can_make_request(user_id):
 def register_request(user_id):
     if is_admin(user_id):
         return
+    ensure_period_reset(user_id)
     record = get_user_record(user_id)
     record["count"] += 1
     save_state()
@@ -224,10 +300,13 @@ def register_referral(new_user_id, referrer_id):
     referrer_record = get_user_record(referrer_id)
     referrer_record["referrals"] += 1
     save_state()
+    mode, limit = ensure_period_reset(referrer_id)
+    save_state()
+    period = "kunlik" if mode == "daily" else "haftalik"
     send_message(
         referrer_id,
         f"🎉 Sizning referal havolangiz orqali yangi foydalanuvchi qo'shildi!\n"
-        f"Kunlik limitingiz endi {user_daily_limit(referrer_id)} taga oshdi.",
+        f"Yangi {period} limitingiz: {limit} ta.",
     )
 
 
@@ -565,27 +644,114 @@ def webhook():
             chat_id,
             "Salom! Menga sticker/custom emoji forward qiling yoki "
             "/getpack <pack_nomi> deb yozing — men barcha fayllarni ZIP qilib beraman.\n\n"
-            "Kuniga 1 marta bepul. Limitni oshirish uchun /ref buyrug'idan foydalaning.",
+            "Batafsil qoidalar va buyruqlar ro'yxati uchun /help yozing.",
         )
+        return {"ok": True}
+
+    if text.startswith("/help"):
+        cfg = get_limit_config()
+        base = cfg["base_weekly"]
+        weekly_cap = cfg["weekly_cap"]
+        help_text = (
+            "📋 <b>Buyruqlar ro'yxati</b>\n\n"
+            "👤 <b>Hammaga:</b>\n"
+            "/start — botni ishga tushirish\n"
+            "/getpack <pack_nomi> — pack'ni ZIP qilib olish\n"
+            "(yoki sticker/custom emoji'ni to'g'ridan-to'g'ri forward qiling)\n"
+            "/ref — referal havolangiz va hozirgi limitingiz\n"
+            "/limit — bugungi/shu haftadagi foydalanishingiz\n"
+            "/help — shu xabar\n\n"
+            "⚙️ <b>Limit qoidalari:</b>\n"
+            f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
+            f"• Har bir referal haftalik imkoniyatingizni +1 taga oshiradi "
+            f"({base} → {base + 1} → {base + 2} → ... → {weekly_cap}).\n"
+            f"• Imkoniyatlar {weekly_cap} taga (kuniga 1 martaga teng) yetganda, "
+            f"tizim HAFTALIKdan KUNLIKka o'tadi.\n"
+            f"• Shundan keyingi HAR BIR qo'shimcha referal kunlik limitingizni "
+            f"2 baravar oshiradi (1 → 2 → 4 → 8 ...).\n"
+            "• Adminlar uchun limit yo'q.\n\n"
+        )
+        if is_admin(user_id):
+            help_text += (
+                "🛠 <b>Admin/Superadmin buyruqlari:</b>\n"
+                "/addadmin @username yoki user_id — admin qo'shish (superadmin)\n"
+                "/deladmin @username yoki user_id — adminlikdan olish (superadmin)\n"
+                "/addlimit @username_yoki_id miqdor — foydalanuvchiga qo'shimcha bonus limit berish (superadmin)\n"
+                "/setbaselimit son — referalsiz foydalanuvchilar uchun haftalik bazaviy limitni o'zgartirish (superadmin)\n"
+                "/setweeklycap son — haftalik imkoniyat qaysi songa yetganda kunlikka o'tishini belgilash (superadmin)\n"
+                "/broadcast xabar — barcha foydalanuvchilarga xabar yuborish (superadmin)\n"
+                "/reload — DB'ni guruhdan qayta yuklash (superadmin)\n\n"
+                "👥 <b>Guruhda (reply orqali, nuqta bilan boshlanadi):</b>\n"
+                ".zip — reply qilingan xabardagi pack'ni ZIP qilib berish\n"
+                ".zipstiker — reply qilingan bitta sticker/emoji'ni yuklab berish\n"
+                ".addadmin — reply qilingan odamni admin qilish (superadmin)\n"
+                ".deladmin — reply qilingan odamni adminlikdan olish (superadmin)\n"
+                ".del — reply qilingan xabarni o'chirish (superadmin)\n"
+            )
+        send_message(chat_id, help_text, parse_mode_html=True)
         return {"ok": True}
 
     if text.startswith("/ref"):
         link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
         record = get_user_record(user_id)
+        mode, limit = ensure_period_reset(user_id)
+        period = "kunlik" if mode == "daily" else "haftalik"
         send_message(
             chat_id,
             f"Referal havolangiz:\n{link}\n\n"
             f"Hozirgi referallar: {record['referrals']}\n"
-            f"Kunlik limitingiz: {user_daily_limit(user_id)}",
+            f"Yangi {period} limitingiz: {limit} ta.",
         )
         return {"ok": True}
 
+    if text.startswith("/setbaselimit"):
+        if user_id != SUPERADMIN_ID:
+            return {"ok": True}
+        parts = text.split()
+        if len(parts) < 2:
+            send_message(chat_id, "Foydalanish: /setbaselimit son\nMasalan: /setbaselimit 1")
+            return {"ok": True}
+        try:
+            value = int(parts[1])
+            if value < 1:
+                raise ValueError
+        except ValueError:
+            send_message(chat_id, "Son musbat butun bo'lishi kerak.")
+            return {"ok": True}
+        cfg = get_limit_config()
+        cfg["base_weekly"] = value
+        save_state()
+        send_message(chat_id, f"✅ Bazaviy haftalik limit endi: {value} ta.")
+        return {"ok": True}
+
+    if text.startswith("/setweeklycap"):
+        if user_id != SUPERADMIN_ID:
+            return {"ok": True}
+        parts = text.split()
+        if len(parts) < 2:
+            send_message(chat_id, "Foydalanish: /setweeklycap son\nMasalan: /setweeklycap 7")
+            return {"ok": True}
+        try:
+            value = int(parts[1])
+            if value < 1:
+                raise ValueError
+        except ValueError:
+            send_message(chat_id, "Son musbat butun bo'lishi kerak.")
+            return {"ok": True}
+        cfg = get_limit_config()
+        cfg["weekly_cap"] = value
+        save_state()
+        send_message(chat_id, f"✅ Haftalik-kunlikka o'tish chegarasi endi: {value} ta/hafta.")
+        return {"ok": True}
+
     if text.startswith("/limit"):
+        if is_admin(user_id):
+            send_message(chat_id, "Foydalanishingiz: cheksiz (admin)")
+            return {"ok": True}
+        mode, limit = ensure_period_reset(user_id)
         record = get_user_record(user_id)
-        limit = user_daily_limit(user_id)
-        used = record["count"] if not is_admin(user_id) else 0
-        status = "cheksiz (admin)" if is_admin(user_id) else f"{used}/{limit}"
-        send_message(chat_id, f"Bugungi foydalanish: {status}")
+        period_label = "Bugungi" if mode == "daily" else "Shu haftadagi"
+        send_message(chat_id, f"{period_label} foydalanish: {record['count']}/{limit}")
         return {"ok": True}
 
     if text.lower().startswith("/reload"):
@@ -654,7 +820,10 @@ def webhook():
         record = get_user_record(target_id)
         record["bonus"] += amount
         save_state()
-        send_message(chat_id, f"✅ id:{target_id} uchun kunlik limit +{amount} qo'shildi. Yangi limit: {user_daily_limit(target_id)}")
+        mode, new_limit = ensure_period_reset(target_id)
+        save_state()
+        period = "kunlik" if mode == "daily" else "haftalik"
+        send_message(chat_id, f"✅ id:{target_id} uchun bonus limit +{amount} qo'shildi. Yangi {period} limit: {new_limit}")
         return {"ok": True}
 
     if text.startswith("/broadcast"):
