@@ -906,6 +906,18 @@ def extract_single_sticker_file(msg):
     return None, None, None
 
 
+def zip_single_file(filename, content):
+    """Bitta faylni ZIP ichiga joylaydi. Telegram .tgs/.webm kabi fayllarni
+    hujjat sifatida emas, animatsion stiker sifatida avtomatik tanib, foydalanuvchi
+    uni oddiy fayl kabi yuklab ololmay qolishining oldini olish uchun kerak —
+    ZIP arxivini esa Telegram hech qachon maxsus ravishda qayta ishlamaydi."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(filename, content)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None):
     """Fon oqimida ishlaydi (webhook darhol javob qaytarishi uchun)."""
     threading.Thread(
@@ -935,7 +947,9 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
     register_request(requester_id)
 
     filename = f"sticker_{emoji_char}{ext}".replace("/", "_")
-    send_document_bytes(chat_id, filename, content)
+    zip_bytes = zip_single_file(filename, content)
+    zip_name = f"{filename}.zip"
+    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
 
     notify_admin(
         f"✅ Bitta sticker yuklandi\n"
@@ -943,7 +957,7 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
         f"Fayl: {filename}"
     )
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} yuklagan sticker")
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker")
 
 
 def handle_single_sticker_request_from_pending(chat_id, pending, requester_id):
@@ -970,7 +984,9 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
     register_request(requester_id)
 
     filename = f"sticker_{pending['emoji_char']}{pending['ext']}".replace("/", "_")
-    send_document_bytes(chat_id, filename, content)
+    zip_bytes = zip_single_file(filename, content)
+    zip_name = f"{filename}.zip"
+    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
 
     notify_admin(
         f"✅ Bitta sticker yuklandi\n"
@@ -978,7 +994,7 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
         f"Fayl: {filename}"
     )
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{pending['requester_info']} yuklagan sticker")
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
 
 
 def resolve_user_id(token):
