@@ -648,6 +648,7 @@ def add_admin(user_id):
         if user_id not in STATE["admins"]:
             STATE["admins"].append(user_id)
             save_state_locked()
+    tg_call("deleteMyCommands", scope={"type": "chat", "chat_id": user_id})
 
 
 def remove_admin(user_id):
@@ -671,6 +672,24 @@ def add_bonus_channel(ch):
         if not any(c["chat_id"] == ch["chat_id"] for c in channels):
             channels.append(ch)
             save_state_locked()
+
+
+def remove_force_channel(chat_id):
+    with _state_lock:
+        channels = STATE.setdefault("force_channels", [])
+        before = len(channels)
+        STATE["force_channels"] = [c for c in channels if c["chat_id"] != chat_id]
+        save_state_locked()
+        return before - len(STATE["force_channels"])
+
+
+def remove_bonus_channel(chat_id):
+    with _state_lock:
+        channels = STATE.setdefault("bonus_channels", [])
+        before = len(channels)
+        STATE["bonus_channels"] = [c for c in channels if c["chat_id"] != chat_id]
+        save_state_locked()
+        return before - len(STATE["bonus_channels"])
 
 
 def claim_bonus_channel(user_id, target_chat_id):
@@ -982,21 +1001,27 @@ def back_to_panel_keyboard():
     return {"inline_keyboard": [[{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}]]}
 
 
-def admin_panel_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "👥 Foydalanuvchilar", "callback_data": "panel_users:0"}],
-            [
-                {"text": "👨‍👩‍👧 Guruhlar", "callback_data": "panel_groups:0"},
-                {"text": "📢 Kanallar", "callback_data": "panel_channels:0"},
-            ],
-            [{"text": "⚙️ Limit sozlamalari", "callback_data": "panel_limits"}],
-            [{"text": "🛡 Adminlar", "callback_data": "panel_admins"}],
-            [{"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"}],
-            [{"text": "📣 Broadcast", "callback_data": "panel_broadcast"}],
-            [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
-        ]
-    }
+def admin_panel_keyboard(user_id):
+    """Oddiy admin — cheklangan panel (ko'rish + broadcast).
+    Superadmin — to'liq boshqaruv panelini ko'radi."""
+    rows = [
+        [{"text": "👥 Foydalanuvchilar", "callback_data": "panel_users:0"}],
+        [
+            {"text": "👨‍👩‍👧 Guruhlar", "callback_data": "panel_groups:0"},
+            {"text": "📢 Kanallar", "callback_data": "panel_channels:0"},
+        ],
+        [
+            {"text": "🔒 Majburiy kanallar", "callback_data": "panel_forcechannels"},
+            {"text": "🎁 Bonus kanallar", "callback_data": "panel_bonuschannels"},
+        ],
+        [{"text": "📣 Broadcast", "callback_data": "panel_broadcast"}],
+    ]
+    if user_id == SUPERADMIN_ID:
+        rows.insert(3, [{"text": "⚙️ Limit sozlamalari", "callback_data": "panel_limits"}])
+        rows.append([{"text": "🛡 Adminlar", "callback_data": "panel_admins"}])
+        rows.append([{"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"}])
+    rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
+    return {"inline_keyboard": rows}
 
 
 PAGE_SIZE = 8
@@ -1186,7 +1211,7 @@ def handle_callback_query(cq):
 
     if data == "menu_admin_panel":
         answer_callback_query(cq_id)
-        safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard())
+        safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard(user_id))
         return
 
     if data.startswith("panel_users:"):
@@ -1209,15 +1234,18 @@ def handle_callback_query(cq):
         rec = get_user_record(target_id)
         pretty = json.dumps(rec, ensure_ascii=False, indent=2)
         text = f"👤 <b>id:{target_id}</b>\n<pre>{pretty}</pre>"
-        keyboard = {"inline_keyboard": [
-            [{"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"}],
-            [{"text": "⬅️ Foydalanuvchilar", "callback_data": "panel_users:0"}],
-        ]}
+        rows = []
+        if user_id == SUPERADMIN_ID:
+            rows.append([{"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"}])
+        rows.append([{"text": "⬅️ Foydalanuvchilar", "callback_data": "panel_users:0"}])
+        keyboard = {"inline_keyboard": rows}
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
     if data.startswith("give_limit:"):
         answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
         target_id = int(data.split(":", 1)[1])
         set_pending_input(user_id, "give_limit_amount", {"target_id": target_id})
         safe_edit_or_send(chat_id, message_id, f"id:{target_id} uchun qo'shiladigan limit sonini yozing (masalan: 5):",
@@ -1289,6 +1317,8 @@ def handle_callback_query(cq):
 
     if data == "panel_limits":
         answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
         cfg = get_limit_config()
         text = (
             f"⚙️ <b>Limit sozlamalari</b>\n\n"
@@ -1311,6 +1341,8 @@ def handle_callback_query(cq):
 
     if data in ("limit_base_dec", "limit_base_inc", "limit_cap_dec", "limit_cap_inc"):
         answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
         cfg = get_limit_config()
         if data == "limit_base_dec":
             set_base_weekly(max(1, cfg["base_weekly"] - 1))
@@ -1342,6 +1374,8 @@ def handle_callback_query(cq):
 
     if data == "panel_admins":
         answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
         with _state_lock:
             admins = list(STATE["admins"])
         rows = [[{"text": f"❌ id:{a}", "callback_data": f"remove_admin:{a}"}] for a in admins]
@@ -1375,8 +1409,91 @@ def handle_callback_query(cq):
                            reply_markup=back_to_panel_keyboard())
         return
 
+    if data == "panel_forcechannels":
+        answer_callback_query(cq_id)
+        channels = get_force_channels()
+        if user_id == SUPERADMIN_ID:
+            rows = [[{"text": f"❌ {c['title']}", "callback_data": f"remove_force:{c['chat_id']}"}] for c in channels]
+            rows.append([{"text": "➕ Kanal qo'shish", "callback_data": "add_force_start"}])
+        else:
+            rows = [[{"text": c["title"], "callback_data": "noop"}] for c in channels]
+        rows.append([{"text": "⬅️ Panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"🔒 Majburiy kanallar ({len(channels)}):",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("remove_force:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        target_id = int(data.split(":", 1)[1])
+        remove_force_channel(target_id)
+        channels = get_force_channels()
+        rows = [[{"text": f"❌ {c['title']}", "callback_data": f"remove_force:{c['chat_id']}"}] for c in channels]
+        rows.append([{"text": "➕ Kanal qo'shish", "callback_data": "add_force_start"}])
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"🔒 Majburiy kanallar ({len(channels)}):",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "add_force_start":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "add_force_channel")
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Majburiy kanal/guruh @username yoki chat_id'sini yuboring.\n\n"
+            "⚠️ Bot o'sha kanal/guruhda ADMIN bo'lishi shart (a'zolarni tekshirish "
+            "va taklif havolasi yaratish uchun).",
+            reply_markup=back_to_panel_keyboard(),
+        )
+        return
+
+    if data == "panel_bonuschannels":
+        answer_callback_query(cq_id)
+        channels = get_bonus_channels()
+        if user_id == SUPERADMIN_ID:
+            rows = [[{"text": f"❌ {c['title']}", "callback_data": f"remove_bonus:{c['chat_id']}"}] for c in channels]
+            rows.append([{"text": "➕ Kanal qo'shish", "callback_data": "add_bonus_start"}])
+        else:
+            rows = [[{"text": c["title"], "callback_data": "noop"}] for c in channels]
+        rows.append([{"text": "⬅️ Panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"🎁 Bonus kanallar ({len(channels)}):",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("remove_bonus:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        target_id = int(data.split(":", 1)[1])
+        remove_bonus_channel(target_id)
+        channels = get_bonus_channels()
+        rows = [[{"text": f"❌ {c['title']}", "callback_data": f"remove_bonus:{c['chat_id']}"}] for c in channels]
+        rows.append([{"text": "➕ Kanal qo'shish", "callback_data": "add_bonus_start"}])
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"🎁 Bonus kanallar ({len(channels)}):",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "add_bonus_start":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "add_bonus_channel")
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Bonus kanal/guruh @username yoki chat_id'sini yuboring.\n\n"
+            "⚠️ Bot o'sha kanal/guruhda ADMIN bo'lishi shart.",
+            reply_markup=back_to_panel_keyboard(),
+        )
+        return
+
     if data == "panel_reaction":
         answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
         current = get_reaction_emoji()
         rows = [[{"text": (f"✅ {e}" if e == current else e), "callback_data": f"set_reaction:{e}"}]
                 for e in REACTION_EMOJI_CHOICES]
@@ -1388,6 +1505,8 @@ def handle_callback_query(cq):
 
     if data.startswith("set_reaction:"):
         answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
         emoji = data.split(":", 1)[1]
         set_reaction_emoji(emoji)
         rows = [[{"text": (f"✅ {e}" if e == emoji else e), "callback_data": f"set_reaction:{e}"}]
@@ -1432,6 +1551,8 @@ def handle_pending_input(chat_id, user_id, text):
 
     if action == "give_limit_amount":
         clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
         target_id = pending["data"]["target_id"]
         try:
             amount = int(text.strip())
@@ -1455,6 +1576,32 @@ def handle_pending_input(chat_id, user_id, text):
             return True
         add_admin(target_id)
         send_message(chat_id, f"✅ id:{target_id} endi bot admini.", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "add_force_channel":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        ch = _resolve_chat(text)
+        if not ch:
+            send_message(chat_id, "Kanal topilmadi. Bot shu kanalda a'zo/admin ekanini tekshiring.",
+                         reply_markup=back_to_panel_keyboard())
+            return True
+        add_force_channel(ch)
+        send_message(chat_id, f"✅ Majburiy kanal qo'shildi: {ch['title']}", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "add_bonus_channel":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        ch = _resolve_chat(text)
+        if not ch:
+            send_message(chat_id, "Kanal topilmadi. Bot shu kanalda a'zo/admin ekanini tekshiring.",
+                         reply_markup=back_to_panel_keyboard())
+            return True
+        add_bonus_channel(ch)
+        send_message(chat_id, f"✅ Bonus kanal qo'shildi: {ch['title']}", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "broadcast":
@@ -1682,9 +1829,22 @@ def set_default_commands():
     tg_call("setMyCommands", commands=[{"command": "start", "description": "Botni ishga tushirish"}])
 
 
+def clear_stale_command_scopes():
+    """Eski (v1) botda superadmin/adminlar uchun ALOHIDA (chat-specific) komandalar
+    menyusi o'rnatilgan edi (setMyCommands + scope=chat). Bu Telegram serverida
+    saqlanib qoladi va global setMyCommands uni qamrab olmaydi — shu sabab eski
+    menyu hamon ko'rinib turadi. Har bir admin/superadmin uchun aynan o'sha scope'ni
+    o'chirib tashlaymiz, shundan keyin ular ham faqat /start'ni ko'radi."""
+    with _state_lock:
+        targets = set(STATE.get("admins", [])) | {SUPERADMIN_ID}
+    for uid in targets:
+        tg_call("deleteMyCommands", scope={"type": "chat", "chat_id": uid})
+
+
 init_bot_identity()
 set_webhook()
 set_default_commands()
+clear_stale_command_scopes()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
