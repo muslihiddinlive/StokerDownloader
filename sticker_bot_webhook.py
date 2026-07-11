@@ -1,42 +1,48 @@
 """
-Sticker/Emoji Downloader Bot — Webhook mode (Render)
-------------------------------------------------------
-Xususiyatlar:
-  - Sticker/custom emoji forward qilish yoki /getpack <nomi/link> orqali
-    pack'ni ZIP qilib berish (faqat shaxsiy chatda avtomatik)
-  - Kunlik limit: 1 foydalanuvchi uchun kuniga 1 marta (adminlar cheksiz)
-  - Referal orqali limitni oshirish (/ref buyrug'i)
-  - Superadmin: reklama tarqatish (/broadcast), admin tayinlash (.addadmin),
-    xabar o'chirish (.del), guruhda ZIP so'rash (.zip, reply orqali)
-  - Guruhda superadmin/admin xabarlariga avtomatik ⚡ reaksiya
-  - Kanalga admin qilinsa, har bir postga avtomatik ⚡ reaksiya
-  - Bot guruhda admin bo'lmasa — guruhda ishlamaydi
-  - DB: Telegram guruhida pinned xabar orqali JSON saqlanadi (DB_GROUP_ID)
-  - Majburiy obuna: superadmin qo'shgan kanal(lar)ga a'zo bo'lmagan foydalanuvchi
-    botdan foydalana olmaydi (/addforcechannel)
-  - Bonus kanallar: a'zo bo'lgan foydalanuvchiga bir martalik +2 limit (/bonus)
-  - Premium: Telegram Stars orqali 6 oylik cheksiz foydalanish (/premium)
-  - Bitta sticker forward qilinganda: "butun pack" yoki "faqat shu fayl" tanlovi
-  - Pack ZIP fayllar keshi: bir xil pack qayta so'ralganda alohida guruhga
-    (CACHE_GROUP_ID) saqlangan file_id orqali qayta yuborilib, Telegram'dan
-    qayta yuklab olinmaydi
-  - /stats (umumiy) va /mystats (shaxsiy) statistikasi
-  - /chatinfo — admin uchun guruh/kanal a'zolari sonini ko'rish
+Sticker/Emoji Downloader Bot — Webhook mode (Render) — v2
+-----------------------------------------------------------
+v2 o'zgarishlari (Akajon so'roviga ko'ra):
+
+- BARCHA "/" komandalar olib tashlandi (faqat /start qoladi — Telegram
+  botlari uchun standart kirish nuqtasi). Hamma narsa inline tugmalar orqali.
+- Superadmin /start bosganda oddiy menyu + "Superadmin panel" tugmasi bilan
+  ochiladi.
+- Superadmin panelda: Foydalanuvchilar / Guruhlar / Kanallar ro'yxati —
+  har birining ustiga bosilsa botning shu obyekt haqida to'plagan BARCHA
+  ma'lumoti ko'rsatiladi.
+- Superadmin istalgan foydalanuvchiga istalgan miqdorda limit bera oladi
+  (panel ichidan, matn kiritish orqali — bosqichma-bosqich).
+- Superadmin bazaviy/haftalik limit sozlamalarini panel orqali boshqaradi.
+- Bot qo'shilgan HAR BIR guruh/kanal reaksiya bosish uchun ishlatadigan
+  emoji superadmin tomonidan panel orqali tanlanadi (config["reaction_emoji"]).
+- Guruhda superadminning xabariga avtomatik shu reaksiya bosiladi (bot
+  o'sha guruhda admin bo'lishi sharti bilan — Telegram reaksiya API talabi).
+- Bot superadminni biror guruh/kanalga "majburan qo'sha olmaydi" — bu
+  Telegram Bot API'da mavjud emas (faqat MTProto user-klient orqali mumkin).
+  Buning o'rniga: superadmin panelidan har bir guruh/kanal uchun bitta
+  tugma bosilsa, bot taklif havolasi (invite link) yaratib, uni
+  superadminning shaxsiy chatiga yuboradi.
+- Race-condition tuzatildi: STATE'ga har qanday o'qish+yozish (read-modify-
+  write) endi global _state_lock (RLock) ostida bajariladi — bir nechta
+  background thread bir vaqtda yozganda ma'lumot yo'qolmasligi uchun.
+- Eski, ikki marta yozilgan (va shundan biri hech qachon ishlamaydigan)
+  ".zipstiker" bloki olib tashlandi — endi bitta joyda, to'g'ri ishlaydi.
+- Pack keshi endi faqat sticker SONI emas, balki barcha file_id'larning
+  hashi orqali tekshiriladi — pack ichidagi bitta fayl almashtirilsa ham
+  kesh avtomatik bekor qilinadi.
+- Bot qaysi guruh/kanallarga qo'shilganini (my_chat_member orqali) va undan
+  chiqarilganini kuzatib boradi — superadmin panelidagi ro'yxatlar shundan
+  to'ldiriladi.
 
 ENV o'zgaruvchilar (Render Environment tab):
-  BOT_TOKEN       - bot tokeni
-  SUPERADMIN_ID   - sizning Telegram user ID'ingiz (butun son)
-  WEBHOOK_URL     - https://<render-app-nomi>.onrender.com
-  DB_GROUP_ID     - DB sifatida ishlatiladigan Telegram guruh ID'si (bot shu
-                    guruhda admin bo'lishi va xabar yuborish huquqiga ega
-                    bo'lishi kerak)
-  CACHE_GROUP_ID  - (ixtiyoriy) Pack ZIP fayllarini keshlash uchun alohida
-                    Telegram guruh ID'si (bot shu guruhda ham a'zo/admin
-                    bo'lishi kerak). Bo'lmasa, keshlash oddiygina o'chiriladi.
-  PORT            - Render avtomatik beradi (default 10000)
+  BOT_TOKEN        - bot tokeni
+  SUPERADMIN_ID    - sizning Telegram user ID'ingiz (butun son)
+  WEBHOOK_URL      - https://<render-app-nomi>.onrender.com
+  DB_GROUP_ID      - DB sifatida ishlatiladigan Telegram guruh ID'si
+  CACHE_GROUP_ID   - (ixtiyoriy) Pack ZIP fayllarini keshlash uchun guruh
+  PORT             - Render avtomatik beradi (default 10000)
 
-MUHIM: Render Start Command'da bitta worker ishlatilishi kerak (state
-xotirada saqlanadi): 
+MUHIM: Render Start Command'da bitta worker ishlatilishi kerak:
   gunicorn sticker_bot_webhook:app --workers 1
 """
 
@@ -44,6 +50,7 @@ import os
 import io
 import json
 import zipfile
+import hashlib
 import logging
 import threading
 from datetime import datetime, timezone
@@ -65,20 +72,27 @@ PORT = int(os.environ.get("PORT", 10000))
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 FILE_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
-REACTION_EMOJI = "⚡"
+DEFAULT_REACTION_EMOJI = "⚡"
+REACTION_EMOJI_CHOICES = ["⚡", "🔥", "❤️", "👍", "🎉", "😎", "🙏", "💯"]
 
 app = Flask(__name__)
 
-BOT_ID = None          # getMe orqali to'ldiriladi
+BOT_ID = None
 BOT_USERNAME = None
-_pinned_message_id = None  # DB pinned xabar ID keshi
-_state_lock = threading.Lock()  # Fon oqimlar bir vaqtda STATE'ni yozib yubormasligi uchun
+_pinned_message_id = None
 
-# Forward qilingan bitta sticker/emoji uchun "Butun pack" / "Faqat shu" tanlovi
-# xotirada saqlanadi (qayta ishga tushganda yo'qoladi — bu qabul qilinadi, chunki
-# tanlov faqat bir necha daqiqa amal qilishi kerak).
-_pending_choices = {}
+# Barcha STATE (persistent, guruhga pinned JSON orqali saqlanadi) ni
+# o'qish/yozish shu RLock ostida bajariladi. RLock chunki ba'zi funksiyalar
+# bir-birini chaqiradi (masalan ensure_period_reset ichida save_state()).
+_state_lock = threading.RLock()
+
+# Vaqtinchalik (persistent bo'lmagan) holatlar — process qayta ishga
+# tushganda yo'qolishi mumkin, bu qabul qilinadi:
+_pending_choices = {}      # forward qilingan stiker uchun "pack/single" tanlovi
 _pending_lock = threading.Lock()
+
+_pending_input = {}        # superadmin panelidagi ko'p bosqichli matn kiritish
+_pending_input_lock = threading.Lock()
 
 
 def store_pending_choice(payload):
@@ -92,6 +106,21 @@ def store_pending_choice(payload):
 def pop_pending_choice(token):
     with _pending_lock:
         return _pending_choices.pop(token, None)
+
+
+def set_pending_input(user_id, action, data=None):
+    with _pending_input_lock:
+        _pending_input[user_id] = {"action": action, "data": data or {}}
+
+
+def get_pending_input(user_id):
+    with _pending_input_lock:
+        return _pending_input.get(user_id)
+
+
+def clear_pending_input(user_id):
+    with _pending_input_lock:
+        _pending_input.pop(user_id, None)
 
 
 # ---------- Telegram API helper funksiyalar ----------
@@ -124,91 +153,18 @@ def edit_message_text(chat_id, message_id, text, parse_mode_html=False, reply_ma
     return tg_call("editMessageText", **params)
 
 
+def safe_edit_or_send(chat_id, message_id, text, parse_mode_html=False, reply_markup=None):
+    result = edit_message_text(chat_id, message_id, text, parse_mode_html=parse_mode_html, reply_markup=reply_markup)
+    if not result.get("ok"):
+        send_message(chat_id, text, parse_mode_html=parse_mode_html, reply_markup=reply_markup)
+
+
 def answer_callback_query(callback_query_id, text=None, show_alert=False):
     params = {"callback_query_id": callback_query_id}
     if text:
         params["text"] = text
-        params["show_alert"] = show_alert
+    params["show_alert"] = show_alert
     return tg_call("answerCallbackQuery", **params)
-
-
-def main_menu_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "📦 Pack yuklab olish", "callback_data": "menu_getpack"}],
-            [
-                {"text": "🔗 Referal", "callback_data": "menu_ref"},
-                {"text": "📊 Limitim", "callback_data": "menu_limit"},
-            ],
-            [
-                {"text": "🎁 Bonus", "callback_data": "menu_bonus"},
-                {"text": "⭐ Premium", "callback_data": "menu_premium"},
-            ],
-            [{"text": "❓ Yordam", "callback_data": "menu_help"}],
-        ]
-    }
-
-
-def back_to_menu_keyboard():
-    return {"inline_keyboard": [[{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}]]}
-
-
-def build_help_text(user_id):
-    cfg = get_limit_config()
-    base = cfg["base_weekly"]
-    weekly_cap = cfg["weekly_cap"]
-    help_text = (
-        "📋 <b>Buyruqlar ro'yxati</b>\n\n"
-        "👤 <b>Hammaga:</b>\n"
-        "/start — botni ishga tushirish\n"
-        "/getpack &lt;pack_nomi&gt; — pack'ni ZIP qilib olish\n"
-        "(yoki sticker/custom emoji'ni to'g'ridan-to'g'ri forward qiling)\n"
-        "/ref — referal havolangiz va hozirgi limitingiz\n"
-        "/limit — bugungi/shu haftadagi foydalanishingiz\n"
-        "/bonus — bonus kanallarga a'zo bo'lib qo'shimcha limit olish\n"
-        "/premium — Stars orqali cheksiz foydalanish (premium) sotib olish\n"
-        "/mystats — shaxsiy statistikangiz\n"
-        "/help — shu xabar\n\n"
-        "⚙️ <b>Limit qoidalari:</b>\n"
-        f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
-        f"• Har bir referal haftalik imkoniyatingizni +1 taga oshiradi "
-        f"({base} → {base + 1} → {base + 2} → ... → {weekly_cap}).\n"
-        f"• Imkoniyatlar {weekly_cap} taga (kuniga 1 martaga teng) yetganda, "
-        f"tizim HAFTALIKdan KUNLIKka o'tadi.\n"
-        f"• Shundan keyingi HAR BIR qo'shimcha referal kunlik limitingizni "
-        f"2 baravar oshiradi (1 → 2 → 4 → 8 ...).\n"
-        "• Adminlar uchun limit yo'q.\n\n"
-    )
-    if is_admin(user_id):
-        help_text += (
-            "🛠 <b>Admin buyruqlari:</b>\n"
-            "/broadcast xabar — barcha foydalanuvchilarga xabar yuborish\n"
-            "/chatinfo @username_yoki_id — guruh/kanal a'zolari sonini ko'rish\n\n"
-            "👥 <b>Guruhda (reply orqali, nuqta bilan boshlanadi):</b>\n"
-            ".zip — reply qilingan xabardagi pack'ni ZIP qilib berish\n"
-            ".zipstiker — reply qilingan bitta sticker/emoji'ni yuklab berish\n"
-        )
-    if user_id == SUPERADMIN_ID:
-        help_text += (
-            "\n👑 <b>Faqat superadmin uchun:</b>\n"
-            "/addadmin @username yoki user_id — admin qo'shish\n"
-            "/deladmin @username yoki user_id — adminlikdan olish\n"
-            "/addlimit @username_yoki_id miqdor — foydalanuvchiga qo'shimcha bonus limit berish\n"
-            "/setbaselimit son — referalsiz foydalanuvchilar uchun haftalik bazaviy limitni o'zgartirish\n"
-            "/setweeklycap son — haftalik imkoniyat qaysi songa yetganda kunlikka o'tishini belgilash\n"
-            "/addforcechannel @username_yoki_id — majburiy obuna kanal qo'shish\n"
-            "/delforcechannel @username_yoki_id — majburiy obuna kanalni olib tashlash\n"
-            "/listforcechannels — majburiy kanallar ro'yxati\n"
-            "/addbonuschannel @username_yoki_id — bonus kanal qo'shish (+2 limit)\n"
-            "/delbonuschannel @username_yoki_id — bonus kanalni olib tashlash\n"
-            "/listbonuschannels — bonus kanallar ro'yxati\n"
-            "/stats — umumiy bot statistikasi\n"
-            "/reload — DB'ni guruhdan qayta yuklash\n"
-            ".addadmin — reply qilingan odamni admin qilish (guruhda)\n"
-            ".deladmin — reply qilingan odamni adminlikdan olish (guruhda)\n"
-            ".del — reply qilingan xabarni o'chirish (guruhda)\n"
-        )
-    return help_text
 
 
 def send_document_bytes(chat_id, filename, file_bytes, caption=None):
@@ -239,12 +195,12 @@ def notify_admin(text):
         send_message(SUPERADMIN_ID, text)
 
 
-def react(chat_id, message_id, emoji=REACTION_EMOJI):
+def react(chat_id, message_id, emoji=None):
     tg_call(
         "setMessageReaction",
         chat_id=chat_id,
         message_id=message_id,
-        reaction=[{"type": "emoji", "emoji": emoji}],
+        reaction=[{"type": "emoji", "emoji": emoji or get_reaction_emoji()}],
     )
 
 
@@ -271,19 +227,17 @@ def default_state():
         "admins": [],
         "users": {},
         "known_users": [],
-        # Superadmin sozlashi mumkin bo'lgan limit konfiguratsiyasi:
-        #   base_weekly  - referalsiz foydalanuvchi uchun haftalik imkoniyatlar soni (default: 7)
-        #   weekly_cap   - haftalik imkoniyatlar shu songa yetganda tizim "kunlik" rejimga o'tadi (default: 7)
-        "config": {"base_weekly": 7, "weekly_cap": 7},
-        # Majburiy kanal/guruhlar — superadmin cheksiz sonda qo'sha oladi.
-        # Foydalanuvchi shaxsiy chatda botdan foydalanishdan oldin ularga a'zo bo'lishi shart.
-        "force_channels": [],  # [{"chat_id": int, "title": str, "username": str|None}]
-        # Bonus kanallar — majburiy emas, lekin a'zo bo'lgan (va tasdiqlagan)
-        # foydalanuvchiga bir martalik +2 limit beriladi.
-        "bonus_channels": [],  # [{"chat_id": int, "title": str, "username": str|None}]
-        # Pack ZIP fayllar keshi (CACHE_GROUP_ID sozlangan bo'lsa ishlaydi).
-        "pack_cache": {},  # {pack_name_lower: {"file_id": str, "sticker_count": int, "cached_at": iso}}
-        # Umumiy statistika (superadmin /stats orqali ko'radi).
+        # Bot qo'shilgan guruh/kanallar kuzatuvi:
+        "groups": {},    # {chat_id_str: {"title","type","added_at"}}
+        "channels": {},  # {chat_id_str: {"title","username","added_at"}}
+        "config": {
+            "base_weekly": 7,
+            "weekly_cap": 7,
+            "reaction_emoji": DEFAULT_REACTION_EMOJI,
+        },
+        "force_channels": [],
+        "bonus_channels": [],
+        "pack_cache": {},  # {pack_name_lower: {"file_id","sticker_count","content_hash","cached_at"}}
         "stats": {"total_requests": 0},
     }
 
@@ -296,9 +250,11 @@ def default_user_record():
         "referrals": 0,
         "referred_by": None,
         "bonus": 0,
-        "premium_until": None,  # UNIX timestamp (UTC) — Stars orqali xarid qilingan cheksiz muddat
-        "claimed_bonus_channels": [],  # bonus olingan kanal chat_id'lari (qayta olinmasligi uchun)
-        "lifetime_requests": 0,  # /mystats uchun — umr bo'yi jami so'rovlar
+        "premium_until": None,
+        "claimed_bonus_channels": [],
+        "lifetime_requests": 0,
+        "username": None,
+        "first_seen": None,
     }
 
 
@@ -310,7 +266,17 @@ def load_state():
         if pinned and pinned.get("text"):
             _pinned_message_id = pinned["message_id"]
             try:
-                return json.loads(pinned["text"])
+                loaded = json.loads(pinned["text"])
+                merged = default_state()
+                merged.update(loaded)
+                # ichki dictlarni ham to'ldirish (yangi kalitlar bo'lsa)
+                for key in ("config",):
+                    d = default_state()[key]
+                    d.update(merged.get(key, {}))
+                    merged[key] = d
+                for key in ("groups", "channels"):
+                    merged.setdefault(key, {})
+                return merged
             except (json.JSONDecodeError, TypeError):
                 log.warning("DB xabari JSON emas, yangi state yaratiladi.")
     return default_state()
@@ -319,29 +285,25 @@ def load_state():
 STATE = load_state()
 
 
-def save_state():
+def save_state_locked():
+    """_state_lock ALLAQACHON ushlanган holatda chaqirilishi kerak."""
     global _pinned_message_id
-    with _state_lock:
-        text = json.dumps(STATE, ensure_ascii=False)
-        if _pinned_message_id:
-            result = tg_call(
-                "editMessageText",
-                chat_id=DB_GROUP_ID,
-                message_id=_pinned_message_id,
-                text=text,
-            )
-            if result.get("ok"):
-                return
-        # Pinned xabar yo'q yoki edit muvaffaqiyatsiz — yangisini yuboramiz
-        result = tg_call("sendMessage", chat_id=DB_GROUP_ID, text=text)
+    text = json.dumps(STATE, ensure_ascii=False)
+    if _pinned_message_id:
+        result = tg_call(
+            "editMessageText", chat_id=DB_GROUP_ID, message_id=_pinned_message_id, text=text,
+        )
         if result.get("ok"):
-            _pinned_message_id = result["result"]["message_id"]
-            tg_call(
-                "pinChatMessage",
-                chat_id=DB_GROUP_ID,
-                message_id=_pinned_message_id,
-                disable_notification=True,
-            )
+            return
+    result = tg_call("sendMessage", chat_id=DB_GROUP_ID, text=text)
+    if result.get("ok"):
+        _pinned_message_id = result["result"]["message_id"]
+        tg_call("pinChatMessage", chat_id=DB_GROUP_ID, message_id=_pinned_message_id, disable_notification=True)
+
+
+def save_state():
+    with _state_lock:
+        save_state_locked()
 
 
 def today_str():
@@ -349,48 +311,121 @@ def today_str():
 
 
 def iso_week_str():
-    # ISO-8601 hafta identifikatori, masalan "2026-W28"
     return datetime.now(timezone.utc).strftime("%G-W%V")
 
 
 def get_limit_config():
-    STATE.setdefault("config", {})
-    cfg = STATE["config"]
-    cfg.setdefault("base_weekly", 7)
-    cfg.setdefault("weekly_cap", 7)
-    return cfg
+    with _state_lock:
+        STATE.setdefault("config", {})
+        cfg = STATE["config"]
+        cfg.setdefault("base_weekly", 7)
+        cfg.setdefault("weekly_cap", 7)
+        cfg.setdefault("reaction_emoji", DEFAULT_REACTION_EMOJI)
+        return dict(cfg)
+
+
+def get_reaction_emoji():
+    return get_limit_config().get("reaction_emoji", DEFAULT_REACTION_EMOJI)
+
+
+def set_reaction_emoji(emoji):
+    with _state_lock:
+        STATE.setdefault("config", {})["reaction_emoji"] = emoji
+        save_state_locked()
+
+
+def set_base_weekly(value):
+    with _state_lock:
+        STATE.setdefault("config", {})["base_weekly"] = value
+        save_state_locked()
+
+
+def set_weekly_cap(value):
+    with _state_lock:
+        STATE.setdefault("config", {})["weekly_cap"] = value
+        save_state_locked()
 
 
 def get_force_channels():
-    STATE.setdefault("force_channels", [])
-    return STATE["force_channels"]
+    with _state_lock:
+        STATE.setdefault("force_channels", [])
+        return list(STATE["force_channels"])
 
 
 def get_bonus_channels():
-    STATE.setdefault("bonus_channels", [])
-    return STATE["bonus_channels"]
+    with _state_lock:
+        STATE.setdefault("bonus_channels", [])
+        return list(STATE["bonus_channels"])
 
 
 def get_pack_cache():
-    STATE.setdefault("pack_cache", {})
-    return STATE["pack_cache"]
+    with _state_lock:
+        STATE.setdefault("pack_cache", {})
+        return STATE["pack_cache"]
 
 
 def get_stats():
-    STATE.setdefault("stats", {"total_requests": 0})
-    STATE["stats"].setdefault("total_requests", 0)
-    return STATE["stats"]
+    with _state_lock:
+        STATE.setdefault("stats", {"total_requests": 0})
+        STATE["stats"].setdefault("total_requests", 0)
+        return dict(STATE["stats"])
 
 
 def bump_total_requests():
-    stats = get_stats()
-    stats["total_requests"] += 1
+    with _state_lock:
+        stats = STATE.setdefault("stats", {"total_requests": 0})
+        stats["total_requests"] = stats.get("total_requests", 0) + 1
+        save_state_locked()
+
+
+# ---------- Guruh/kanal kuzatuvi ----------
+
+def register_group(chat):
+    with _state_lock:
+        groups = STATE.setdefault("groups", {})
+        key = str(chat["id"])
+        if key not in groups:
+            groups[key] = {
+                "title": chat.get("title") or str(chat["id"]),
+                "type": chat.get("type"),
+                "added_at": datetime.now(timezone.utc).isoformat(),
+            }
+            save_state_locked()
+        else:
+            groups[key]["title"] = chat.get("title") or groups[key]["title"]
+
+
+def register_channel(chat):
+    with _state_lock:
+        channels = STATE.setdefault("channels", {})
+        key = str(chat["id"])
+        if key not in channels:
+            channels[key] = {
+                "title": chat.get("title") or str(chat["id"]),
+                "username": chat.get("username"),
+                "added_at": datetime.now(timezone.utc).isoformat(),
+            }
+            save_state_locked()
+        else:
+            channels[key]["title"] = chat.get("title") or channels[key]["title"]
+            channels[key]["username"] = chat.get("username")
+
+
+def forget_group(chat_id):
+    with _state_lock:
+        STATE.setdefault("groups", {}).pop(str(chat_id), None)
+        save_state_locked()
+
+
+def forget_channel(chat_id):
+    with _state_lock:
+        STATE.setdefault("channels", {}).pop(str(chat_id), None)
+        save_state_locked()
 
 
 # ---------- Majburiy / bonus kanallar ----------
 
 def _resolve_chat(token):
-    """'@username' yoki chat_id'ni getChat orqali {"chat_id","title","username"} ga aylantiradi."""
     token = token.strip()
     chat_id = token
     try:
@@ -409,19 +444,22 @@ def _resolve_chat(token):
     }
 
 
+def _invite_link_for(chat_id):
+    data = tg_call("createChatInviteLink", chat_id=chat_id)
+    if data.get("ok"):
+        return data["result"]["invite_link"]
+    return None
+
+
 def _channel_join_button(ch):
     if ch.get("username"):
         url = f"https://t.me/{ch['username']}"
     else:
-        # Public username bo'lmagan kanal/guruh uchun taklif havolasi yaratamiz
-        # (bot shu chatda admin bo'lishi va invite link yaratish huquqiga ega bo'lishi kerak).
-        data = tg_call("createChatInviteLink", chat_id=ch["chat_id"])
-        url = data["result"]["invite_link"] if data.get("ok") else f"https://t.me/{ch['chat_id']}"
+        url = _invite_link_for(ch["chat_id"]) or f"https://t.me/{ch['chat_id']}"
     return {"text": f"➕ {ch['title']}", "url": url}
 
 
 def missing_force_channels(user_id):
-    """Foydalanuvchi hali a'zo bo'lmagan majburiy kanallar ro'yxatini qaytaradi."""
     missing = []
     for ch in get_force_channels():
         status = get_chat_member_status(ch["chat_id"], user_id)
@@ -431,8 +469,6 @@ def missing_force_channels(user_id):
 
 
 def enforce_force_join(chat_id, user_id):
-    """True — foydalanuvchi davom etishi mumkin. False — majburiy kanal(lar)ga
-    a'zo bo'lishi kerakligi haqida xabar yuborilgan, chaqiruvchi funksiya to'xtashi kerak."""
     if is_admin(user_id):
         return True
     missing = missing_force_channels(user_id)
@@ -469,27 +505,15 @@ def build_bonus_menu_text_and_keyboard(user_id):
     return "\n".join(lines), {"inline_keyboard": keyboard}
 
 
-# ---------- Xabar tahrirlashda muvaffaqiyatsizlik bo'lsa yangi xabar yuborish ----------
-
-def safe_edit_or_send(chat_id, message_id, text, parse_mode_html=False, reply_markup=None):
-    """editMessageText muvaffaqiyatsiz bo'lsa (masalan xabar juda eski yoki
-    o'chirilgan), jim qolish o'rniga yangi xabar yuboradi — 'tugma ishlamayapti'
-    kabi muammolarning oldini oladi."""
-    result = edit_message_text(chat_id, message_id, text, parse_mode_html=parse_mode_html, reply_markup=reply_markup)
-    if not result.get("ok"):
-        send_message(chat_id, text, parse_mode_html=parse_mode_html, reply_markup=reply_markup)
-
-
 def get_user_record(user_id):
-    uid = str(user_id)
-    if uid not in STATE["users"]:
-        STATE["users"][uid] = default_user_record()
-    record = STATE["users"][uid]
-    # Eski yozuvlar bilan moslik uchun:
-    defaults = default_user_record()
-    for key, value in defaults.items():
-        record.setdefault(key, value)
-    return record
+    with _state_lock:
+        uid = str(user_id)
+        if uid not in STATE["users"]:
+            STATE["users"][uid] = default_user_record()
+        record = STATE["users"][uid]
+        for key, value in default_user_record().items():
+            record.setdefault(key, value)
+        return record
 
 
 def is_premium(user_id):
@@ -501,117 +525,28 @@ def is_premium(user_id):
 
 
 def grant_premium(user_id, days=182):
-    """Stars orqali xarid qilingandan keyin cheksiz muddatni yoqadi (default ~6 oy)."""
-    record = get_user_record(user_id)
-    now = datetime.now(timezone.utc).timestamp()
-    current_until = record.get("premium_until") or now
-    base = max(now, current_until)
-    record["premium_until"] = base + days * 86400
-    save_state()
-    return record["premium_until"]
-
-
-# ---------- Rol asosidagi "/" buyruqlar menyusi (setMyCommands) ----------
-# BotFather orqali qo'lda sozlash o'rniga — har bir foydalanuvchi guruhiga
-# (oddiy/admin/superadmin) mos ro'yxat avtomatik ko'rsatiladi.
-
-USER_COMMANDS = [
-    ("start", "Botni ishga tushirish"),
-    ("getpack", "Pack'ni ZIP qilib olish"),
-    ("ref", "Referal havolangiz va limitingiz"),
-    ("limit", "Joriy foydalanishingiz"),
-    ("bonus", "Bonus kanallar orqali limit oshirish"),
-    ("premium", "Cheksiz foydalanish (Stars)"),
-    ("mystats", "Shaxsiy statistikangiz"),
-    ("help", "Yordam va buyruqlar ro'yxati"),
-]
-
-ADMIN_EXTRA_COMMANDS = [
-    ("broadcast", "Barcha foydalanuvchilarga xabar yuborish"),
-    ("chatinfo", "Guruh/kanal a'zolari sonini ko'rish"),
-]
-
-SUPERADMIN_EXTRA_COMMANDS = [
-    ("addadmin", "Admin qo'shish"),
-    ("deladmin", "Adminlikdan olish"),
-    ("addlimit", "Foydalanuvchiga bonus limit berish"),
-    ("setbaselimit", "Haftalik bazaviy limitni o'zgartirish"),
-    ("setweeklycap", "Kunlikka o'tish chegarasini belgilash"),
-    ("addforcechannel", "Majburiy obuna kanal qo'shish"),
-    ("delforcechannel", "Majburiy obuna kanalni olib tashlash"),
-    ("listforcechannels", "Majburiy kanallar ro'yxati"),
-    ("addbonuschannel", "Bonus kanal qo'shish"),
-    ("delbonuschannel", "Bonus kanalni olib tashlash"),
-    ("listbonuschannels", "Bonus kanallar ro'yxati"),
-    ("stats", "Umumiy bot statistikasi"),
-    ("reload", "DB'ni guruhdan qayta yuklash"),
-]
-
-
-def _commands_payload(commands):
-    return [{"command": name, "description": desc} for name, desc in commands]
-
-
-def set_default_commands():
-    """Hech qanday maxsus scope'i bo'lmagan barcha foydalanuvchilar uchun bazaviy ro'yxat."""
-    tg_call("setMyCommands", commands=_commands_payload(USER_COMMANDS))
-
-
-def set_chat_commands(chat_id, commands):
-    """Muayyan foydalanuvchi (chat_id) uchun kengaytirilgan buyruqlar ro'yxatini o'rnatadi."""
-    tg_call(
-        "setMyCommands",
-        commands=_commands_payload(commands),
-        scope={"type": "chat", "chat_id": chat_id},
-    )
-
-
-def reset_chat_commands(chat_id):
-    """Foydalanuvchini bazaviy (default) ro'yxatga qaytaradi (masalan, admin olib tashlanganda)."""
-    tg_call("deleteMyCommands", scope={"type": "chat", "chat_id": chat_id})
-
-
-def sync_role_commands(user_id):
-    """user_id'ning joriy roliga qarab uning shaxsiy chatidagi '/' menyusini yangilaydi."""
-    if user_id == SUPERADMIN_ID:
-        set_chat_commands(user_id, USER_COMMANDS + ADMIN_EXTRA_COMMANDS + SUPERADMIN_EXTRA_COMMANDS)
-    elif user_id in STATE["admins"]:
-        set_chat_commands(user_id, USER_COMMANDS + ADMIN_EXTRA_COMMANDS)
-    else:
-        reset_chat_commands(user_id)
-
-
-def sync_all_role_commands():
-    """Bot ishga tushganda superadmin va barcha adminlar uchun menyularni qayta o'rnatadi."""
-    set_default_commands()
-    sync_role_commands(SUPERADMIN_ID)
-    for admin_id in STATE.get("admins", []):
-        sync_role_commands(admin_id)
+    with _state_lock:
+        record = get_user_record(user_id)
+        now = datetime.now(timezone.utc).timestamp()
+        current_until = record.get("premium_until") or now
+        base = max(now, current_until)
+        record["premium_until"] = base + days * 86400
+        save_state_locked()
+        return record["premium_until"]
 
 
 def is_admin(user_id):
-    return user_id == SUPERADMIN_ID or user_id in STATE["admins"]
+    with _state_lock:
+        return user_id == SUPERADMIN_ID or user_id in STATE["admins"]
 
 
 def compute_user_limit(user_id):
-    """
-    Limit mantig'i:
-      - Referalsiz: haftasiga `base_weekly` marta (default 1/hafta).
-      - Har bir referal haftalik imkoniyatni +1 qiladi: 1 -> 2 -> 3 -> ... -> weekly_cap.
-      - Imkoniyatlar soni `weekly_cap`ga (default 7, ya'ni har kuni 1 marta) yetganda,
-        tizim HAFTALIKdan KUNLIKka o'tadi (kunlik 1 marta).
-      - Shundan keyingi HAR BIR qo'shimcha referal kunlik limitni 2 baravar oshiradi
-        (1 -> 2 -> 4 -> 8 -> ...).
-      - Superadmin bergan qo'shimcha bonus (/addlimit) ustiga qo'shiladi.
-    Qaytaradi: (mode, limit) bu yerda mode "weekly" yoki "daily".
-    """
     record = get_user_record(user_id)
     cfg = get_limit_config()
     base = cfg["base_weekly"]
     weekly_cap = cfg["weekly_cap"]
     referrals = record["referrals"]
-    threshold = max(0, weekly_cap - base)  # kunlik rejimga o'tish uchun kerak bo'lgan referallar soni
-
+    threshold = max(0, weekly_cap - base)
     slots = base + referrals
     if slots < weekly_cap:
         mode = "weekly"
@@ -619,22 +554,22 @@ def compute_user_limit(user_id):
     else:
         mode = "daily"
         extra = max(0, referrals - threshold)
-        limit = 2 ** extra  # har qo'shimcha referal uchun 2x
-
+        limit = 2 ** extra
     limit += record.get("bonus", 0)
     return mode, max(1, limit)
 
 
 def ensure_period_reset(user_id):
-    """Foydalanuvchi rejimi (haftalik/kunlik) o'zgargan yoki davr (hafta/kun) yangilangan bo'lsa, hisoblagichni nolga tushiradi."""
-    record = get_user_record(user_id)
-    mode, limit = compute_user_limit(user_id)
-    key = today_str() if mode == "daily" else iso_week_str()
-    if record.get("mode") != mode or record.get("period_key") != key:
-        record["mode"] = mode
-        record["period_key"] = key
-        record["count"] = 0
-    return mode, limit
+    with _state_lock:
+        record = get_user_record(user_id)
+        mode, limit = compute_user_limit(user_id)
+        key = today_str() if mode == "daily" else iso_week_str()
+        if record.get("mode") != mode or record.get("period_key") != key:
+            record["mode"] = mode
+            record["period_key"] = key
+            record["count"] = 0
+            save_state_locked()
+        return mode, limit
 
 
 def limit_period_label(mode):
@@ -650,47 +585,103 @@ def can_make_request(user_id):
         period = "kunlik" if mode == "daily" else "haftalik"
         return False, (
             f"{period.capitalize()} limitingiz tugadi ({limit}/{limit}, {limit_period_label(mode)}).\n"
-            f"Limitni oshirish uchun /ref orqali do'stlaringizni taklif qiling."
+            f"Limitni oshirish uchun referal havolangiz orqali do'stlaringizni taklif qiling."
         )
     return True, None
 
 
 def register_request(user_id):
-    record = get_user_record(user_id)
-    record["lifetime_requests"] = record.get("lifetime_requests", 0) + 1
-    bump_total_requests()
-    if is_admin(user_id) or is_premium(user_id):
-        save_state()
-        return
-    ensure_period_reset(user_id)
-    record["count"] += 1
-    save_state()
+    with _state_lock:
+        record = get_user_record(user_id)
+        record["lifetime_requests"] = record.get("lifetime_requests", 0) + 1
+        stats = STATE.setdefault("stats", {"total_requests": 0})
+        stats["total_requests"] = stats.get("total_requests", 0) + 1
+        if is_admin(user_id) or is_premium(user_id):
+            save_state_locked()
+            return
+        ensure_period_reset(user_id)
+        record["count"] += 1
+        save_state_locked()
 
 
-def register_known_user(user_id):
-    if user_id not in STATE["known_users"]:
-        STATE["known_users"].append(user_id)
-        save_state()
+def register_known_user(user_id, from_user=None):
+    with _state_lock:
+        if user_id not in STATE["known_users"]:
+            STATE["known_users"].append(user_id)
+        record = get_user_record(user_id)
+        if not record.get("first_seen"):
+            record["first_seen"] = datetime.now(timezone.utc).isoformat()
+        if from_user and from_user.get("username"):
+            record["username"] = from_user["username"]
+        save_state_locked()
 
 
 def register_referral(new_user_id, referrer_id):
-    new_record = get_user_record(new_user_id)
-    if new_record["referred_by"] is not None:
-        return  # avval ro'yxatdan o'tgan, qayta hisoblanmaydi
-    if new_user_id == referrer_id:
-        return
-    new_record["referred_by"] = referrer_id
-    referrer_record = get_user_record(referrer_id)
-    referrer_record["referrals"] += 1
-    save_state()
-    mode, limit = ensure_period_reset(referrer_id)
-    save_state()
+    with _state_lock:
+        new_record = get_user_record(new_user_id)
+        if new_record["referred_by"] is not None or new_user_id == referrer_id:
+            return
+        new_record["referred_by"] = referrer_id
+        referrer_record = get_user_record(referrer_id)
+        referrer_record["referrals"] += 1
+        save_state_locked()
+        mode, limit = ensure_period_reset(referrer_id)
     period = "kunlik" if mode == "daily" else "haftalik"
     send_message(
         referrer_id,
         f"🎉 Sizning referal havolangiz orqali yangi foydalanuvchi qo'shildi!\n"
         f"Yangi {period} limitingiz: {limit} ta.",
     )
+
+
+def add_bonus_to_user(user_id, amount):
+    with _state_lock:
+        record = get_user_record(user_id)
+        record["bonus"] = record.get("bonus", 0) + amount
+        save_state_locked()
+        mode, limit = ensure_period_reset(user_id)
+    return mode, limit
+
+
+def add_admin(user_id):
+    with _state_lock:
+        if user_id not in STATE["admins"]:
+            STATE["admins"].append(user_id)
+            save_state_locked()
+
+
+def remove_admin(user_id):
+    with _state_lock:
+        if user_id in STATE["admins"]:
+            STATE["admins"].remove(user_id)
+            save_state_locked()
+
+
+def add_force_channel(ch):
+    with _state_lock:
+        channels = STATE.setdefault("force_channels", [])
+        if not any(c["chat_id"] == ch["chat_id"] for c in channels):
+            channels.append(ch)
+            save_state_locked()
+
+
+def add_bonus_channel(ch):
+    with _state_lock:
+        channels = STATE.setdefault("bonus_channels", [])
+        if not any(c["chat_id"] == ch["chat_id"] for c in channels):
+            channels.append(ch)
+            save_state_locked()
+
+
+def claim_bonus_channel(user_id, target_chat_id):
+    with _state_lock:
+        record = get_user_record(user_id)
+        if target_chat_id in record["claimed_bonus_channels"]:
+            return False
+        record["claimed_bonus_channels"].append(target_chat_id)
+        record["bonus"] = record.get("bonus", 0) + 2
+        save_state_locked()
+        return True
 
 
 # ---------- Sticker/emoji pack yuklash mantiqi ----------
@@ -730,11 +721,17 @@ def file_ext_for(sticker):
     return ".webp"
 
 
+def pack_content_hash(sticker_set):
+    """Pack ichidagi barcha file_unique_id'lardan hash — pack tarkibi (bitta fayl
+    almashtirilgan bo'lsa ham) o'zgarganini aniqlash uchun, faqat sonini emas."""
+    ids = sorted(s.get("file_unique_id", "") for s in sticker_set.get("stickers", []))
+    return hashlib.sha256("|".join(ids).encode()).hexdigest()
+
+
 def process_pack(pack_name):
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
         return None, "Pack topilmadi. Nomini tekshiring."
-
     stickers = sticker_set["stickers"]
     buf = io.BytesIO()
     count = 0
@@ -749,14 +746,11 @@ def process_pack(pack_name):
             fname = f"{i:03d}_{emoji_char}{ext}".replace("/", "_")
             zf.writestr(fname, content)
             count += 1
-
     buf.seek(0)
     return buf, count
 
 
 def handle_pack_request(chat_id, pack_name, requester_info, requester_id, reply_to=None):
-    """Webhook so'rovini darhol bo'shatish uchun fon oqimida ishlaydi
-    (Telegram webhook timeout / qayta-yuborishning oldini olish uchun)."""
     threading.Thread(
         target=_handle_pack_request_sync,
         args=(chat_id, pack_name, requester_info, requester_id, reply_to),
@@ -772,85 +766,68 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
 
     send_message(chat_id, f"'{pack_name}' qidirilmoqda, kuting...", reply_to=reply_to)
 
-    # ---- Keshni tekshirish (CACHE_GROUP_ID sozlangan bo'lsa) ----
+    sticker_set = get_sticker_set(pack_name)
+    if not sticker_set:
+        send_message(chat_id, "Pack topilmadi. Nomini tekshiring.", reply_to=reply_to)
+        notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: topilmadi")
+        return
+
+    current_hash = pack_content_hash(sticker_set)
+
     if CACHE_GROUP_ID:
         cache = get_pack_cache()
         cached = cache.get(pack_name.lower())
-        if cached:
-            sticker_set = get_sticker_set(pack_name)
-            if sticker_set and len(sticker_set["stickers"]) == cached.get("sticker_count"):
-                result = send_document_by_file_id(
-                    chat_id, cached["file_id"], caption=f"{cached['sticker_count']} ta fayl topildi. (kesh)"
-                )
-                if result.get("ok"):
-                    register_request(requester_id)
-                    notify_admin(
-                        f"✅ So'rov keshdan bajarildi\n"
-                        f"Kimdan: {requester_info}\n"
-                        f"Pack: {pack_name}"
+        if cached and cached.get("content_hash") == current_hash:
+            result = send_document_by_file_id(
+                chat_id, cached["file_id"], caption=f"{cached['sticker_count']} ta fayl topildi. (kesh)"
+            )
+            if result.get("ok"):
+                register_request(requester_id)
+                notify_admin(f"✅ So'rov keshdan bajarildi\nKimdan: {requester_info}\nPack: {pack_name}")
+                if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+                    send_document_by_file_id(
+                        SUPERADMIN_ID, cached["file_id"],
+                        caption=f"{requester_info} so'ragan pack: {pack_name} (kesh)",
                     )
-                    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-                        send_document_by_file_id(
-                            SUPERADMIN_ID, cached["file_id"],
-                            caption=f"{requester_info} so'ragan pack: {pack_name} (kesh)",
-                        )
-                    return
-            else:
-                # Pack yangilangan (stiker soni o'zgargan) — eski keshni bekor qilamiz
-                cache.pop(pack_name.lower(), None)
+                return
+        elif cached:
+            with _state_lock:
+                get_pack_cache().pop(pack_name.lower(), None)
+                save_state_locked()
 
     buf, result = process_pack(pack_name)
     if buf is None:
         send_message(chat_id, result, reply_to=reply_to)
-        notify_admin(
-            f"⚠️ Muvaffaqiyatsiz so'rov\n"
-            f"Kimdan: {requester_info}\n"
-            f"Pack: {pack_name}\n"
-            f"Sabab: {result}"
-        )
+        notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: {result}")
         return
 
     register_request(requester_id)
-
     zip_bytes = buf.getvalue()
-    send_result = send_document_bytes(
-        chat_id,
-        f"{pack_name}.zip",
-        zip_bytes,
-        caption=f"{result} ta fayl topildi.",
-    )
+    send_result = send_document_bytes(chat_id, f"{pack_name}.zip", zip_bytes, caption=f"{result} ta fayl topildi.")
 
-    # ---- Keshga saqlash: cache guruhiga alohida nusxa yuborib file_id'ni saqlaymiz ----
     if CACHE_GROUP_ID:
         cache_result = send_document_bytes(CACHE_GROUP_ID, f"{pack_name}.zip", zip_bytes)
         if cache_result.get("ok"):
             doc = cache_result["result"]["document"]
-            get_pack_cache()[pack_name.lower()] = {
-                "file_id": doc["file_id"],
-                "sticker_count": result,
-                "cached_at": datetime.now(timezone.utc).isoformat(),
-            }
+            with _state_lock:
+                get_pack_cache()[pack_name.lower()] = {
+                    "file_id": doc["file_id"],
+                    "sticker_count": result,
+                    "content_hash": current_hash,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                }
+                save_state_locked()
 
-    save_state()
-
-    notify_admin(
-        f"✅ Yangi so'rov bajarildi\n"
-        f"Kimdan: {requester_info}\n"
-        f"Pack: {pack_name}\n"
-        f"Fayllar soni: {result}"
-    )
+    notify_admin(f"✅ Yangi so'rov bajarildi\nKimdan: {requester_info}\nPack: {pack_name}\nFayllar soni: {result}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         if send_result.get("ok"):
             send_document_by_file_id(
-                SUPERADMIN_ID,
-                send_result["result"]["document"]["file_id"],
+                SUPERADMIN_ID, send_result["result"]["document"]["file_id"],
                 caption=f"{requester_info} so'ragan pack: {pack_name} ({result} ta fayl)",
             )
         else:
             send_document_bytes(
-                SUPERADMIN_ID,
-                f"{pack_name}.zip",
-                zip_bytes,
+                SUPERADMIN_ID, f"{pack_name}.zip", zip_bytes,
                 caption=f"{requester_info} so'ragan pack: {pack_name} ({result} ta fayl)",
             )
 
@@ -872,7 +849,6 @@ def extract_pack_name_from_message(msg):
     sticker = msg.get("sticker")
     if sticker and sticker.get("set_name"):
         return sticker["set_name"]
-
     for field, entity_field in (("text", "entities"), ("caption", "caption_entities")):
         entities = msg.get(entity_field) or []
         for ent in entities:
@@ -880,20 +856,16 @@ def extract_pack_name_from_message(msg):
                 set_name = get_custom_emoji_set_name(ent["custom_emoji_id"])
                 if set_name:
                     return set_name
-
     link_name = extract_pack_name_from_link(msg.get("text"))
     if link_name:
         return link_name
-
     return None
 
 
 def extract_single_sticker_file(msg):
-    """Xabardagi bitta sticker/custom emoji faylini (file_id, ext, emoji) qaytaradi."""
     sticker = msg.get("sticker")
     if sticker:
         return sticker["file_id"], file_ext_for(sticker), sticker.get("emoji", "")
-
     for field, entity_field in (("text", "entities"), ("caption", "caption_entities")):
         entities = msg.get(entity_field) or []
         for ent in entities:
@@ -902,15 +874,10 @@ def extract_single_sticker_file(msg):
                 if data.get("ok") and data["result"]:
                     em = data["result"][0]
                     return em["file_id"], file_ext_for(em), em.get("emoji", "")
-
     return None, None, None
 
 
 def zip_single_file(filename, content):
-    """Bitta faylni ZIP ichiga joylaydi. Telegram .tgs/.webm kabi fayllarni
-    hujjat sifatida emas, animatsion stiker sifatida avtomatik tanib, foydalanuvchi
-    uni oddiy fayl kabi yuklab ololmay qolishining oldini olish uchun kerak —
-    ZIP arxivini esa Telegram hech qachon maxsus ravishda qayta ishlamaydi."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(filename, content)
@@ -919,7 +886,6 @@ def zip_single_file(filename, content):
 
 
 def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None):
-    """Fon oqimida ishlaydi (webhook darhol javob qaytarishi uchun)."""
     threading.Thread(
         target=_handle_single_sticker_request_sync,
         args=(chat_id, reply, requester_info, requester_id, reply_to),
@@ -932,36 +898,26 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
     if not allowed:
         send_message(chat_id, reason, reply_to=reply_to)
         return
-
     file_id, ext, emoji_char = extract_single_sticker_file(reply)
     if not file_id:
         send_message(chat_id, "Bu xabarda sticker/custom emoji topilmadi.", reply_to=reply_to)
         return
-
     file_path = get_file_path(file_id)
     if not file_path:
         send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
         return
-
     content = download_file_bytes(file_path)
     register_request(requester_id)
-
     filename = f"sticker_{emoji_char}{ext}".replace("/", "_")
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
     send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
-
-    notify_admin(
-        f"✅ Bitta sticker yuklandi\n"
-        f"Kimdan: {requester_info}\n"
-        f"Fayl: {filename}"
-    )
+    notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker")
 
 
 def handle_single_sticker_request_from_pending(chat_id, pending, requester_id):
-    """dl_single: callback orqali — pending tanlovdagi file_id asosida bitta faylni yuboradi."""
     threading.Thread(
         target=_handle_single_sticker_request_from_pending_sync,
         args=(chat_id, pending, requester_id),
@@ -974,41 +930,19 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
     if not allowed:
         send_message(chat_id, reason)
         return
-
     file_path = get_file_path(pending["file_id"])
     if not file_path:
         send_message(chat_id, "Faylni olishda xato yuz berdi.")
         return
-
     content = download_file_bytes(file_path)
     register_request(requester_id)
-
     filename = f"sticker_{pending['emoji_char']}{pending['ext']}".replace("/", "_")
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
     send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
-
-    notify_admin(
-        f"✅ Bitta sticker yuklandi\n"
-        f"Kimdan: {pending['requester_info']}\n"
-        f"Fayl: {filename}"
-    )
+    notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {pending['requester_info']}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
-
-
-def resolve_user_id(token):
-    """'@username' yoki raqamli ID'ni user_id'ga aylantiradi."""
-    token = token.strip()
-    if token.startswith("@"):
-        data = tg_call("getChat", chat_id=token)
-        if data.get("ok"):
-            return data["result"]["id"]
-        return None
-    try:
-        return int(token)
-    except ValueError:
-        return None
 
 
 def requester_label(from_user):
@@ -1019,72 +953,90 @@ def requester_label(from_user):
     )
 
 
-# ---------- Guruh buyruqlari (.zip, .addadmin, .deladmin, .del) ----------
+# ================= INLINE MENYULAR =================
 
-def handle_group_dot_commands(msg, chat_id, user_id, text):
-    reply = msg.get("reply_to_message")
-
-    if text.strip() == ".zipstiker":
-        if not is_admin(user_id):
-            return True
-        if not reply:
-            send_message(chat_id, "Sticker/custom emoji xabariga reply qilib .zipstiker yozing.")
-            return True
-        handle_single_sticker_request(chat_id, reply, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
-        return True
-
-    if text.strip() == ".zip":
-        if not is_admin(user_id):
-            return True
-        if not reply:
-            send_message(chat_id, "Stiker/custom emoji xabariga reply qilib .zip yozing.")
-            return True
-        pack_name = extract_pack_name_from_message(reply)
-        if not pack_name:
-            send_message(chat_id, "Bu xabardan pack nomini topa olmadim.")
-            return True
-        handle_pack_request(chat_id, pack_name, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
-        return True
-
-    if text.strip() == ".addadmin":
-        if user_id != SUPERADMIN_ID:
-            return True
-        if not reply:
-            send_message(chat_id, "Admin qilmoqchi bo'lgan odamning xabariga reply qiling.")
-            return True
-        target_id = reply["from"]["id"]
-        if target_id not in STATE["admins"]:
-            STATE["admins"].append(target_id)
-            save_state()
-        send_message(chat_id, f"✅ {requester_label(reply['from'])} endi bot admini.")
-        return True
-
-    if text.strip() == ".deladmin":
-        if user_id != SUPERADMIN_ID:
-            return True
-        if not reply:
-            send_message(chat_id, "Admindan olib tashlamoqchi bo'lgan odamning xabariga reply qiling.")
-            return True
-        target_id = reply["from"]["id"]
-        if target_id in STATE["admins"]:
-            STATE["admins"].remove(target_id)
-            save_state()
-        send_message(chat_id, f"❌ {requester_label(reply['from'])} bot adminligidan olindi.")
-        return True
-
-    if text.strip() == ".del":
-        if user_id != SUPERADMIN_ID:
-            return True
-        if not reply:
-            send_message(chat_id, "O'chirmoqchi bo'lgan xabarga reply qilib .del yozing.")
-            return True
-        delete_message(chat_id, reply["message_id"])
-        return True
-
-    return False
+def main_menu_keyboard(user_id):
+    rows = [
+        [{"text": "📦 Pack yuklab olish", "callback_data": "menu_getpack"}],
+        [
+            {"text": "🔗 Referal", "callback_data": "menu_ref"},
+            {"text": "📊 Limitim", "callback_data": "menu_limit"},
+        ],
+        [
+            {"text": "🎁 Bonus", "callback_data": "menu_bonus"},
+            {"text": "⭐ Premium", "callback_data": "menu_premium"},
+        ],
+        [{"text": "❓ Yordam", "callback_data": "menu_help"}],
+    ]
+    if is_admin(user_id):
+        rows.append([{"text": "👑 Superadmin panel" if user_id == SUPERADMIN_ID else "🛠 Admin panel",
+                       "callback_data": "menu_admin_panel"}])
+    return {"inline_keyboard": rows}
 
 
-# ---------- Inline menyu (callback_query) ----------
+def back_to_menu_keyboard():
+    return {"inline_keyboard": [[{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}]]}
+
+
+def back_to_panel_keyboard():
+    return {"inline_keyboard": [[{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}]]}
+
+
+def admin_panel_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "👥 Foydalanuvchilar", "callback_data": "panel_users:0"}],
+            [
+                {"text": "👨‍👩‍👧 Guruhlar", "callback_data": "panel_groups:0"},
+                {"text": "📢 Kanallar", "callback_data": "panel_channels:0"},
+            ],
+            [{"text": "⚙️ Limit sozlamalari", "callback_data": "panel_limits"}],
+            [{"text": "🛡 Adminlar", "callback_data": "panel_admins"}],
+            [{"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"}],
+            [{"text": "📣 Broadcast", "callback_data": "panel_broadcast"}],
+            [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
+        ]
+    }
+
+
+PAGE_SIZE = 8
+
+
+def _paginate_keyboard(items, prefix, page):
+    """items: list of (key, label). prefix: callback prefix, ex 'user_detail'."""
+    start = page * PAGE_SIZE
+    chunk = items[start:start + PAGE_SIZE]
+    rows = [[{"text": label, "callback_data": f"{prefix}:{key}"}] for key, label in chunk]
+    nav = []
+    if page > 0:
+        nav.append({"text": "⬅️", "callback_data": f"panel_{prefix.split('_')[0]}s:{page - 1}"})
+    if start + PAGE_SIZE < len(items):
+        nav.append({"text": "➡️", "callback_data": f"panel_{prefix.split('_')[0]}s:{page + 1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+    return {"inline_keyboard": rows}
+
+
+def build_help_text(user_id):
+    cfg = get_limit_config()
+    base = cfg["base_weekly"]
+    weekly_cap = cfg["weekly_cap"]
+    return (
+        "📋 <b>Bot haqida</b>\n\n"
+        "Menga sticker/custom emoji forward qiling yoki \"📦 Pack yuklab olish\" "
+        "tugmasini bosib pack nomini yuboring — men barcha fayllarni ZIP qilib beraman.\n\n"
+        "⚙️ <b>Limit qoidalari:</b>\n"
+        f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
+        f"• Har bir referal haftalik imkoniyatingizni +1 taga oshiradi "
+        f"({base} → {base + 1} → ... → {weekly_cap}).\n"
+        f"• Imkoniyatlar {weekly_cap} taga yetganda, tizim HAFTALIKdan KUNLIKka o'tadi.\n"
+        f"• Shundan keyin har bir qo'shimcha referal kunlik limitni 2 baravar oshiradi.\n"
+        "• Adminlar/premium uchun limit yo'q.\n"
+    )
+
+
+# ---------- Callback query handler ----------
 
 def handle_callback_query(cq):
     cq_id = cq["id"]
@@ -1099,31 +1051,25 @@ def handle_callback_query(cq):
         answer_callback_query(cq_id)
         return
 
-    register_known_user(user_id)
+    register_known_user(user_id, from_user)
 
+    # ---- Umumiy foydalanuvchi menyulari ----
     if data == "menu_home":
         answer_callback_query(cq_id)
         safe_edit_or_send(
-            chat_id,
-            message_id,
-            "Salom! Menga sticker/custom emoji forward qiling yoki "
-            "/getpack <pack_nomi> deb yozing — men barcha fayllarni ZIP qilib beraman.\n\n"
-            "Quyidagi tugmalardan ham foydalanishingiz mumkin 👇",
-            reply_markup=main_menu_keyboard(),
+            chat_id, message_id,
+            "Salom! Menga sticker/custom emoji forward qiling yoki pastdagi "
+            "\"📦 Pack yuklab olish\" tugmasi orqali pack nomini yuboring.",
+            reply_markup=main_menu_keyboard(user_id),
         )
         return
 
     if data == "menu_getpack":
         answer_callback_query(cq_id)
+        set_pending_input(user_id, "getpack")
         safe_edit_or_send(
-            chat_id,
-            message_id,
-            "📦 Pack yuklab olish uchun:\n\n"
-            "• <code>/getpack pack_nomi</code> deb yozing, YOKI\n"
-            "• pack ichidagi istalgan bitta sticker/custom emoji'ni menga forward qiling.\n\n"
-            "Pack nomini uning ulashish havolasidan ham olsangiz bo'ladi "
-            "(masalan t.me/addstickers/<b>pack_nomi</b>).",
-            parse_mode_html=True,
+            chat_id, message_id,
+            "📦 Pack nomini (yoki t.me/addstickers/... havolasini) yozib yuboring:",
             reply_markup=back_to_menu_keyboard(),
         )
         return
@@ -1133,11 +1079,9 @@ def handle_callback_query(cq):
         link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
         record = get_user_record(user_id)
         mode, limit = ensure_period_reset(user_id)
-        save_state()
         period = "kunlik" if mode == "daily" else "haftalik"
         safe_edit_or_send(
-            chat_id,
-            message_id,
+            chat_id, message_id,
             f"🔗 Referal havolangiz:\n{link}\n\n"
             f"Hozirgi referallar: {record['referrals']}\n"
             f"Yangi {period} limitingiz: {limit} ta.",
@@ -1151,7 +1095,6 @@ def handle_callback_query(cq):
             text = "📊 Foydalanishingiz: cheksiz (admin)"
         else:
             mode, limit = ensure_period_reset(user_id)
-            save_state()
             record = get_user_record(user_id)
             period_label = "Bugungi" if mode == "daily" else "Shu haftadagi"
             text = f"📊 {period_label} foydalanish: {record['count']}/{limit}"
@@ -1160,13 +1103,8 @@ def handle_callback_query(cq):
 
     if data == "menu_help":
         answer_callback_query(cq_id)
-        safe_edit_or_send(
-            chat_id,
-            message_id,
-            build_help_text(user_id),
-            parse_mode_html=True,
-            reply_markup=back_to_menu_keyboard(),
-        )
+        safe_edit_or_send(chat_id, message_id, build_help_text(user_id), parse_mode_html=True,
+                           reply_markup=back_to_menu_keyboard())
         return
 
     if data == "menu_bonus":
@@ -1180,33 +1118,25 @@ def handle_callback_query(cq):
         if is_premium(user_id):
             record = get_user_record(user_id)
             until = datetime.fromtimestamp(record["premium_until"], tz=timezone.utc).strftime("%Y-%m-%d")
-            text = f"⭐ Sizda premium allaqachon faol — {until} sanagacha cheksiz foydalanasiz."
-            safe_edit_or_send(chat_id, message_id, text, reply_markup=back_to_menu_keyboard())
+            safe_edit_or_send(chat_id, message_id,
+                               f"⭐ Sizda premium allaqachon faol — {until} sanagacha cheksiz foydalanasiz.",
+                               reply_markup=back_to_menu_keyboard())
         else:
-            text = (
-                "⭐ <b>Premium</b>\n\n"
-                "Premium bilan kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
-                "(6 oy muddatga, Telegram Stars orqali)."
-            )
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "⭐ 100 Stars uchun sotib olish", "callback_data": "buy_premium"}],
-                    [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
-                ]
-            }
+            text = ("⭐ <b>Premium</b>\n\nPremium bilan kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
+                    "(6 oy muddatga, Telegram Stars orqali).")
+            keyboard = {"inline_keyboard": [
+                [{"text": "⭐ 100 Stars uchun sotib olish", "callback_data": "buy_premium"}],
+                [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
+            ]}
             safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
     if data == "buy_premium":
         answer_callback_query(cq_id)
         tg_call(
-            "sendInvoice",
-            chat_id=chat_id,
-            title="StokerDownloader Premium (6 oy)",
+            "sendInvoice", chat_id=chat_id, title="StokerDownloader Premium (6 oy)",
             description="Cheksiz pack yuklab olish, kunlik/haftalik limitlarsiz — 6 oy muddatga.",
-            payload=f"premium_182:{user_id}",
-            provider_token="",  # Telegram Stars (XTR) uchun bo'sh string bo'lishi shart
-            currency="XTR",
+            payload=f"premium_182:{user_id}", provider_token="", currency="XTR",
             prices=[{"label": "Premium 6 oy", "amount": 100}],
         )
         return
@@ -1217,27 +1147,19 @@ def handle_callback_query(cq):
             answer_callback_query(cq_id, "Hali ham barcha kanallarga a'zo emassiz.", show_alert=True)
             return
         answer_callback_query(cq_id, "✅ Rahmat! Endi botdan foydalanishingiz mumkin.", show_alert=True)
-        safe_edit_or_send(
-            chat_id,
-            message_id,
-            "✅ Barcha majburiy kanallarga a'zo bo'ldingiz. Botdan foydalanishingiz mumkin!",
-            reply_markup=main_menu_keyboard(),
-        )
+        safe_edit_or_send(chat_id, message_id, "✅ Barcha majburiy kanallarga a'zo bo'ldingiz.",
+                           reply_markup=main_menu_keyboard(user_id))
         return
 
     if data.startswith("claim_bonus:"):
         target_chat_id = int(data.split(":", 1)[1])
         status = get_chat_member_status(target_chat_id, user_id)
-        record = get_user_record(user_id)
         if status not in ("member", "administrator", "creator"):
             answer_callback_query(cq_id, "Hali bu kanalga a'zo emassiz.", show_alert=True)
             return
-        if target_chat_id in record["claimed_bonus_channels"]:
+        if not claim_bonus_channel(user_id, target_chat_id):
             answer_callback_query(cq_id, "Bu bonusni allaqachon olgansiz.", show_alert=True)
             return
-        record["claimed_bonus_channels"].append(target_chat_id)
-        record["bonus"] = record.get("bonus", 0) + 2
-        save_state()
         answer_callback_query(cq_id, "🎉 +2 limit qo'shildi!", show_alert=True)
         text, keyboard = build_bonus_menu_text_and_keyboard(user_id)
         safe_edit_or_send(chat_id, message_id, text, reply_markup=keyboard)
@@ -1257,7 +1179,349 @@ def handle_callback_query(cq):
             handle_single_sticker_request_from_pending(chat_id, pending, user_id)
         return
 
+    # ---- Quyidagilar faqat adminlar uchun ----
+    if not is_admin(user_id):
+        answer_callback_query(cq_id)
+        return
+
+    if data == "menu_admin_panel":
+        answer_callback_query(cq_id)
+        safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard())
+        return
+
+    if data.startswith("panel_users:"):
+        answer_callback_query(cq_id)
+        page = int(data.split(":", 1)[1])
+        with _state_lock:
+            uids = list(STATE["known_users"])
+        items = []
+        for uid in uids:
+            rec = get_user_record(uid)
+            label = f"@{rec['username']}" if rec.get("username") else f"id:{uid}"
+            items.append((uid, label))
+        safe_edit_or_send(chat_id, message_id, f"👥 Foydalanuvchilar ({len(items)}):",
+                           reply_markup=_paginate_keyboard(items, "user_detail", page))
+        return
+
+    if data.startswith("user_detail:"):
+        answer_callback_query(cq_id)
+        target_id = int(data.split(":", 1)[1])
+        rec = get_user_record(target_id)
+        pretty = json.dumps(rec, ensure_ascii=False, indent=2)
+        text = f"👤 <b>id:{target_id}</b>\n<pre>{pretty}</pre>"
+        keyboard = {"inline_keyboard": [
+            [{"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"}],
+            [{"text": "⬅️ Foydalanuvchilar", "callback_data": "panel_users:0"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data.startswith("give_limit:"):
+        answer_callback_query(cq_id)
+        target_id = int(data.split(":", 1)[1])
+        set_pending_input(user_id, "give_limit_amount", {"target_id": target_id})
+        safe_edit_or_send(chat_id, message_id, f"id:{target_id} uchun qo'shiladigan limit sonini yozing (masalan: 5):",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data.startswith("panel_groups:"):
+        answer_callback_query(cq_id)
+        page = int(data.split(":", 1)[1])
+        with _state_lock:
+            groups = dict(STATE.get("groups", {}))
+        items = [(gid, info.get("title", gid)) for gid, info in groups.items()]
+        safe_edit_or_send(chat_id, message_id, f"👨‍👩‍👧 Guruhlar ({len(items)}):",
+                           reply_markup=_paginate_keyboard(items, "group_detail", page))
+        return
+
+    if data.startswith("group_detail:"):
+        answer_callback_query(cq_id)
+        gid = data.split(":", 1)[1]
+        with _state_lock:
+            info = dict(STATE.get("groups", {}).get(gid, {}))
+        pretty = json.dumps(info, ensure_ascii=False, indent=2)
+        text = f"👨‍👩‍👧 <b>Guruh {gid}</b>\n<pre>{pretty}</pre>"
+        keyboard = {"inline_keyboard": [
+            [{"text": "🔗 Meni taklif qil (invite link)", "callback_data": f"invite_me:{gid}"}],
+            [{"text": "⬅️ Guruhlar", "callback_data": "panel_groups:0"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data.startswith("panel_channels:"):
+        answer_callback_query(cq_id)
+        page = int(data.split(":", 1)[1])
+        with _state_lock:
+            channels = dict(STATE.get("channels", {}))
+        items = [(cid, info.get("title", cid)) for cid, info in channels.items()]
+        safe_edit_or_send(chat_id, message_id, f"📢 Kanallar ({len(items)}):",
+                           reply_markup=_paginate_keyboard(items, "channel_detail", page))
+        return
+
+    if data.startswith("channel_detail:"):
+        answer_callback_query(cq_id)
+        cid = data.split(":", 1)[1]
+        with _state_lock:
+            info = dict(STATE.get("channels", {}).get(cid, {}))
+        pretty = json.dumps(info, ensure_ascii=False, indent=2)
+        text = f"📢 <b>Kanal {cid}</b>\n<pre>{pretty}</pre>"
+        keyboard = {"inline_keyboard": [
+            [{"text": "🔗 Meni taklif qil (invite link)", "callback_data": f"invite_me:{cid}"}],
+            [{"text": "⬅️ Kanallar", "callback_data": "panel_channels:0"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data.startswith("invite_me:"):
+        answer_callback_query(cq_id)
+        target_chat_id = int(data.split(":", 1)[1])
+        link = _invite_link_for(target_chat_id)
+        if link:
+            send_message(
+                user_id,
+                "🔗 Eslatma: Telegram Bot API orqali botning sizni majburan a'zo qilishi "
+                "imkonsiz (bu faqat MTProto user-klientda mavjud). Quyidagi havola orqali "
+                f"o'zingiz qo'shilishingiz mumkin:\n{link}",
+            )
+        else:
+            send_message(user_id, "Taklif havolasini yaratib bo'lmadi — bot shu chatda admin ekanini tekshiring.")
+        return
+
+    if data == "panel_limits":
+        answer_callback_query(cq_id)
+        cfg = get_limit_config()
+        text = (
+            f"⚙️ <b>Limit sozlamalari</b>\n\n"
+            f"Bazaviy haftalik: {cfg['base_weekly']}\n"
+            f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
+        )
+        keyboard = {"inline_keyboard": [
+            [
+                {"text": "Bazaviy −1", "callback_data": "limit_base_dec"},
+                {"text": "Bazaviy +1", "callback_data": "limit_base_inc"},
+            ],
+            [
+                {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
+                {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
+            ],
+            [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data in ("limit_base_dec", "limit_base_inc", "limit_cap_dec", "limit_cap_inc"):
+        answer_callback_query(cq_id)
+        cfg = get_limit_config()
+        if data == "limit_base_dec":
+            set_base_weekly(max(1, cfg["base_weekly"] - 1))
+        elif data == "limit_base_inc":
+            set_base_weekly(cfg["base_weekly"] + 1)
+        elif data == "limit_cap_dec":
+            set_weekly_cap(max(1, cfg["weekly_cap"] - 1))
+        elif data == "limit_cap_inc":
+            set_weekly_cap(cfg["weekly_cap"] + 1)
+        cfg = get_limit_config()
+        text = (
+            f"⚙️ <b>Limit sozlamalari</b>\n\n"
+            f"Bazaviy haftalik: {cfg['base_weekly']}\n"
+            f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
+        )
+        keyboard = {"inline_keyboard": [
+            [
+                {"text": "Bazaviy −1", "callback_data": "limit_base_dec"},
+                {"text": "Bazaviy +1", "callback_data": "limit_base_inc"},
+            ],
+            [
+                {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
+                {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
+            ],
+            [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data == "panel_admins":
+        answer_callback_query(cq_id)
+        with _state_lock:
+            admins = list(STATE["admins"])
+        rows = [[{"text": f"❌ id:{a}", "callback_data": f"remove_admin:{a}"}] for a in admins]
+        rows.append([{"text": "➕ Admin qo'shish", "callback_data": "add_admin_start"}])
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"🛡 Adminlar ({len(admins)}):",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("remove_admin:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        target_id = int(data.split(":", 1)[1])
+        remove_admin(target_id)
+        with _state_lock:
+            admins = list(STATE["admins"])
+        rows = [[{"text": f"❌ id:{a}", "callback_data": f"remove_admin:{a}"}] for a in admins]
+        rows.append([{"text": "➕ Admin qo'shish", "callback_data": "add_admin_start"}])
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"🛡 Adminlar ({len(admins)}):",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "add_admin_start":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "add_admin")
+        safe_edit_or_send(chat_id, message_id, "Yangi admin qilinadigan foydalanuvchi ID raqamini yuboring:",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data == "panel_reaction":
+        answer_callback_query(cq_id)
+        current = get_reaction_emoji()
+        rows = [[{"text": (f"✅ {e}" if e == current else e), "callback_data": f"set_reaction:{e}"}]
+                for e in REACTION_EMOJI_CHOICES]
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id,
+                           f"⚡ Guruh/kanallardagi reaksiya emojisi (hozirgi: {current}):",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("set_reaction:"):
+        answer_callback_query(cq_id)
+        emoji = data.split(":", 1)[1]
+        set_reaction_emoji(emoji)
+        rows = [[{"text": (f"✅ {e}" if e == emoji else e), "callback_data": f"set_reaction:{e}"}]
+                for e in REACTION_EMOJI_CHOICES]
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"⚡ Reaksiya emoji o'rnatildi: {emoji}",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "panel_broadcast":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "broadcast")
+        safe_edit_or_send(chat_id, message_id, "📣 Barchaga yuboriladigan xabar matnini yozing:",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
     answer_callback_query(cq_id)
+
+
+# ---------- Superadmin/admin panelining matnli (pending_input) javoblari ----------
+
+def handle_pending_input(chat_id, user_id, text):
+    """True qaytarsa — xabar shu yerda to'liq qayta ishlangan (webhook to'xtaydi)."""
+    pending = get_pending_input(user_id)
+    if not pending:
+        return False
+
+    action = pending["action"]
+
+    if action == "getpack":
+        clear_pending_input(user_id)
+        if not enforce_force_join(chat_id, user_id):
+            return True
+        pack_name = extract_pack_name_from_link(text) or text.strip()
+        handle_pack_request(chat_id, pack_name, requester_label({"id": user_id}), user_id)
+        return True
+
+    # Quyidagilar faqat adminlar uchun ishlaydi:
+    if not is_admin(user_id):
+        clear_pending_input(user_id)
+        return True
+
+    if action == "give_limit_amount":
+        clear_pending_input(user_id)
+        target_id = pending["data"]["target_id"]
+        try:
+            amount = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        mode, new_limit = add_bonus_to_user(target_id, amount)
+        period = "kunlik" if mode == "daily" else "haftalik"
+        send_message(chat_id, f"✅ id:{target_id} uchun bonus limit +{amount} qo'shildi. Yangi {period} limit: {new_limit}",
+                     reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "add_admin":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        try:
+            target_id = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun ID kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        add_admin(target_id)
+        send_message(chat_id, f"✅ id:{target_id} endi bot admini.", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "broadcast":
+        clear_pending_input(user_id)
+        with _state_lock:
+            uids = list(STATE["known_users"])
+        sent = 0
+        for uid in uids:
+            r = send_message(uid, text)
+            if r.get("ok"):
+                sent += 1
+        send_message(chat_id, f"📣 Xabar {sent} ta foydalanuvchiga yuborildi.", reply_markup=back_to_panel_keyboard())
+        return True
+
+    clear_pending_input(user_id)
+    return False
+
+
+# ---------- Guruh ".zip" / ".zipstiker" (moderatsion, admin-only) ----------
+
+def handle_group_dot_commands(msg, chat_id, user_id, text):
+    reply = msg.get("reply_to_message")
+    stripped = text.strip()
+
+    if stripped == ".zipstiker":
+        if not is_admin(user_id):
+            return True
+        if not reply:
+            send_message(chat_id, "Sticker/custom emoji xabariga reply qilib .zipstiker yozing.")
+            return True
+        handle_single_sticker_request(chat_id, reply, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
+        return True
+
+    if stripped == ".zip":
+        if not is_admin(user_id):
+            return True
+        if not reply:
+            send_message(chat_id, "Stiker/custom emoji xabariga reply qilib .zip yozing.")
+            return True
+        pack_name = extract_pack_name_from_message(reply)
+        if not pack_name:
+            send_message(chat_id, "Bu xabardan pack nomini topa olmadim.")
+            return True
+        handle_pack_request(chat_id, pack_name, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
+        return True
+
+    if stripped == ".addadmin":
+        if user_id != SUPERADMIN_ID or not reply:
+            return True
+        add_admin(reply["from"]["id"])
+        send_message(chat_id, f"✅ {requester_label(reply['from'])} endi bot admini.")
+        return True
+
+    if stripped == ".deladmin":
+        if user_id != SUPERADMIN_ID or not reply:
+            return True
+        remove_admin(reply["from"]["id"])
+        send_message(chat_id, f"❌ {requester_label(reply['from'])} bot adminligidan olindi.")
+        return True
+
+    if stripped == ".del":
+        if user_id != SUPERADMIN_ID or not reply:
+            return True
+        delete_message(chat_id, reply["message_id"])
+        return True
+
+    return False
 
 
 # ---------- Webhook endpoint ----------
@@ -1267,21 +1531,36 @@ def webhook():
     global STATE
     update = request.get_json(force=True)
 
-    # ---- Inline tugma bosilishi (callback_query) ----
     callback_query = update.get("callback_query")
     if callback_query:
         handle_callback_query(callback_query)
         return {"ok": True}
 
-    # ---- Kanal postlari: bot admin bo'lsa avtomatik reaksiya ----
+    # ---- Bot biror guruh/kanalga qo'shildi/chiqarildi ----
+    my_chat_member = update.get("my_chat_member")
+    if my_chat_member:
+        chat = my_chat_member["chat"]
+        new_status = my_chat_member["new_chat_member"]["status"]
+        if chat.get("type") == "channel":
+            if new_status in ("administrator", "member"):
+                register_channel(chat)
+            elif new_status in ("left", "kicked"):
+                forget_channel(chat["id"])
+        elif chat.get("type") in ("group", "supergroup"):
+            if new_status in ("administrator", "member"):
+                register_group(chat)
+            elif new_status in ("left", "kicked"):
+                forget_group(chat["id"])
+        return {"ok": True}
+
     channel_post = update.get("channel_post")
     if channel_post:
         chat_id = channel_post["chat"]["id"]
+        register_channel(channel_post["chat"])
         if bot_is_group_admin(chat_id):
             react(chat_id, channel_post["message_id"])
         return {"ok": True}
 
-    # ---- Stars to'lovi: checkout tasdiqlash ----
     pre_checkout_query = update.get("pre_checkout_query")
     if pre_checkout_query:
         tg_call("answerPreCheckoutQuery", pre_checkout_query_id=pre_checkout_query["id"], ok=True)
@@ -1291,7 +1570,6 @@ def webhook():
     if not msg:
         return {"ok": True}
 
-    # ---- Stars to'lovi muvaffaqiyatli yakunlandi ----
     successful_payment = msg.get("successful_payment")
     if successful_payment:
         payer_id = msg["from"]["id"]
@@ -1310,26 +1588,24 @@ def webhook():
 
     is_group = chat_type in ("group", "supergroup")
 
-    # ---- Guruhda bot admin emasligini tekshirish ----
-    if is_group and not bot_is_group_admin(chat_id):
-        return {"ok": True}
-
-    # ---- Guruhda superadmin/admin xabariga avtomatik reaksiya ----
-    if is_group and is_admin(user_id):
-        react(chat_id, msg["message_id"])
-
-    # ---- Guruh nuqtali buyruqlari (.zip, .addadmin, .deladmin, .del) ----
-    if is_group and text.strip().startswith("."):
-        if handle_group_dot_commands(msg, chat_id, user_id, text):
-            return {"ok": True}
-
-    # ---- Guruhda stiker/emoji tushsa — avtomatik zip QILINMAYDI ----
     if is_group:
+        register_group(msg["chat"])
+        if not bot_is_group_admin(chat_id):
+            return {"ok": True}
+        if is_admin(user_id):
+            react(chat_id, msg["message_id"])
+        if text.strip().startswith("."):
+            if handle_group_dot_commands(msg, chat_id, user_id, text):
+                return {"ok": True}
         return {"ok": True}
 
-    # ================= Shaxsiy chat (private) mantiqi =================
+    # ================= Shaxsiy chat (private) =================
 
-    register_known_user(user_id)
+    register_known_user(user_id, from_user)
+
+    # Superadmin panelidan kutilayotgan matn kiritish bo'lsa, avval shuni tekshiramiz:
+    if handle_pending_input(chat_id, user_id, text):
+        return {"ok": True}
 
     if text.startswith("/start"):
         parts = text.split(maxsplit=1)
@@ -1339,356 +1615,13 @@ def webhook():
                 register_referral(user_id, referrer_id)
             except ValueError:
                 pass
-        send_message(
-            chat_id,
-            "Salom! Menga sticker/custom emoji forward qiling yoki "
-            "/getpack <pack_nomi> deb yozing — men barcha fayllarni ZIP qilib beraman.\n\n"
-            "Quyidagi tugmalardan ham foydalanishingiz mumkin 👇",
-            reply_markup=main_menu_keyboard(),
+        greeting = (
+            "Salom! Menga sticker/custom emoji forward qiling yoki pastdagi "
+            "\"📦 Pack yuklab olish\" tugmasi orqali pack nomini yuboring."
         )
-        return {"ok": True}
-
-    if text.startswith("/help"):
-        send_message(chat_id, build_help_text(user_id), parse_mode_html=True, reply_markup=back_to_menu_keyboard())
-        return {"ok": True}
-
-    if text.startswith("/ref"):
-        link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-        record = get_user_record(user_id)
-        mode, limit = ensure_period_reset(user_id)
-        period = "kunlik" if mode == "daily" else "haftalik"
-        send_message(
-            chat_id,
-            f"Referal havolangiz:\n{link}\n\n"
-            f"Hozirgi referallar: {record['referrals']}\n"
-            f"Yangi {period} limitingiz: {limit} ta.",
-        )
-        return {"ok": True}
-
-    if text.startswith("/setbaselimit"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split()
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /setbaselimit son\nMasalan: /setbaselimit 1")
-            return {"ok": True}
-        try:
-            value = int(parts[1])
-            if value < 1:
-                raise ValueError
-        except ValueError:
-            send_message(chat_id, "Son musbat butun bo'lishi kerak.")
-            return {"ok": True}
-        cfg = get_limit_config()
-        cfg["base_weekly"] = value
-        save_state()
-        send_message(chat_id, f"✅ Bazaviy haftalik limit endi: {value} ta.")
-        return {"ok": True}
-
-    if text.startswith("/setweeklycap"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split()
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /setweeklycap son\nMasalan: /setweeklycap 7")
-            return {"ok": True}
-        try:
-            value = int(parts[1])
-            if value < 1:
-                raise ValueError
-        except ValueError:
-            send_message(chat_id, "Son musbat butun bo'lishi kerak.")
-            return {"ok": True}
-        cfg = get_limit_config()
-        cfg["weekly_cap"] = value
-        save_state()
-        send_message(chat_id, f"✅ Haftalik-kunlikka o'tish chegarasi endi: {value} ta/hafta.")
-        return {"ok": True}
-
-    if text.startswith("/limit"):
-        if is_admin(user_id):
-            send_message(chat_id, "Foydalanishingiz: cheksiz (admin)")
-            return {"ok": True}
-        mode, limit = ensure_period_reset(user_id)
-        record = get_user_record(user_id)
-        period_label = "Bugungi" if mode == "daily" else "Shu haftadagi"
-        send_message(chat_id, f"{period_label} foydalanish: {record['count']}/{limit}")
-        return {"ok": True}
-
-    if text.startswith("/mystats"):
-        record = get_user_record(user_id)
-        premium_line = ""
-        if is_premium(user_id):
-            until = datetime.fromtimestamp(record["premium_until"], tz=timezone.utc).strftime("%Y-%m-%d")
-            premium_line = f"⭐ Premium: {until} sanagacha faol\n"
-        send_message(
-            chat_id,
-            "📈 <b>Shaxsiy statistikangiz</b>\n\n"
-            f"Jami yuklab olingan fayllar: {record.get('lifetime_requests', 0)}\n"
-            f"Referallar soni: {record['referrals']}\n"
-            f"Bonus limit: {record.get('bonus', 0)}\n"
-            f"{premium_line}",
-            parse_mode_html=True,
-        )
-        return {"ok": True}
-
-    if text.startswith("/bonus"):
-        text_out, keyboard = build_bonus_menu_text_and_keyboard(user_id)
-        send_message(chat_id, text_out, reply_markup=keyboard)
-        return {"ok": True}
-
-    if text.startswith("/premium"):
-        if is_premium(user_id):
-            record = get_user_record(user_id)
-            until = datetime.fromtimestamp(record["premium_until"], tz=timezone.utc).strftime("%Y-%m-%d")
-            send_message(chat_id, f"⭐ Sizda premium allaqachon faol — {until} sanagacha cheksiz foydalanasiz.")
-        else:
-            send_message(
-                chat_id,
-                "⭐ <b>Premium</b>\n\nCheksiz pack yuklab olish, 6 oy muddatga.",
-                parse_mode_html=True,
-                reply_markup={"inline_keyboard": [[{"text": "⭐ 100 Stars uchun sotib olish", "callback_data": "buy_premium"}]]},
-            )
-        return {"ok": True}
-
-    if text.startswith("/chatinfo"):
-        if not is_admin(user_id):
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /chatinfo @username yoki chat_id")
-            return {"ok": True}
-        ch = _resolve_chat(parts[1])
-        if not ch:
-            send_message(chat_id, "Guruh/kanal topilmadi.")
-            return {"ok": True}
-        count_data = tg_call("getChatMemberCount", chat_id=ch["chat_id"])
-        count = count_data["result"] if count_data.get("ok") else "noma'lum"
-        info_lines = [f"📋 {ch['title']}", f"ID: {ch['chat_id']}"]
-        if ch["username"]:
-            info_lines.append(f"Username: @{ch['username']}")
-        info_lines.append(f"A'zolar soni: {count}")
-        send_message(chat_id, "\n".join(info_lines))
-        return {"ok": True}
-
-    if text.startswith("/stats"):
-        if not is_admin(user_id):
-            return {"ok": True}
-        stats = get_stats()
-        send_message(
-            chat_id,
-            "📊 <b>Umumiy statistika</b>\n\n"
-            f"Foydalanuvchilar (known_users): {len(STATE['known_users'])}\n"
-            f"Adminlar: {len(STATE['admins'])}\n"
-            f"Jami so'rovlar (umr bo'yi): {stats['total_requests']}\n"
-            f"Majburiy kanallar: {len(get_force_channels())}\n"
-            f"Bonus kanallar: {len(get_bonus_channels())}\n"
-            f"Keshdagi packlar: {len(get_pack_cache())}\n",
-            parse_mode_html=True,
-        )
-        return {"ok": True}
-
-    if text.startswith("/addforcechannel"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /addforcechannel @username yoki chat_id")
-            return {"ok": True}
-        ch = _resolve_chat(parts[1])
-        if not ch:
-            send_message(chat_id, "Kanal topilmadi. Bot shu kanalda a'zo/admin ekanini tekshiring.")
-            return {"ok": True}
-        channels = get_force_channels()
-        if not any(c["chat_id"] == ch["chat_id"] for c in channels):
-            channels.append(ch)
-            save_state()
-        send_message(chat_id, f"✅ Majburiy kanal qo'shildi: {ch['title']}")
-        return {"ok": True}
-
-    if text.startswith("/delforcechannel"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /delforcechannel @username yoki chat_id")
-            return {"ok": True}
-        ch = _resolve_chat(parts[1])
-        target_id = ch["chat_id"] if ch else None
-        channels = get_force_channels()
-        before = len(channels)
-        STATE["force_channels"] = [c for c in channels if c["chat_id"] != target_id]
-        save_state()
-        removed = before - len(STATE["force_channels"])
-        send_message(chat_id, f"✅ Olib tashlandi ({removed})." if removed else "Topilmadi.")
-        return {"ok": True}
-
-    if text.startswith("/listforcechannels"):
-        if not is_admin(user_id):
-            return {"ok": True}
-        channels = get_force_channels()
-        if not channels:
-            send_message(chat_id, "Majburiy kanallar yo'q.")
-        else:
-            lines = "\n".join(f"• {c['title']} (id:{c['chat_id']})" for c in channels)
-            send_message(chat_id, f"🔒 Majburiy kanallar:\n{lines}")
-        return {"ok": True}
-
-    if text.startswith("/addbonuschannel"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /addbonuschannel @username yoki chat_id")
-            return {"ok": True}
-        ch = _resolve_chat(parts[1])
-        if not ch:
-            send_message(chat_id, "Kanal topilmadi. Bot shu kanalda a'zo/admin ekanini tekshiring.")
-            return {"ok": True}
-        channels = get_bonus_channels()
-        if not any(c["chat_id"] == ch["chat_id"] for c in channels):
-            channels.append(ch)
-            save_state()
-        send_message(chat_id, f"✅ Bonus kanal qo'shildi: {ch['title']}")
-        return {"ok": True}
-
-    if text.startswith("/delbonuschannel"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /delbonuschannel @username yoki chat_id")
-            return {"ok": True}
-        ch = _resolve_chat(parts[1])
-        target_id = ch["chat_id"] if ch else None
-        channels = get_bonus_channels()
-        before = len(channels)
-        STATE["bonus_channels"] = [c for c in channels if c["chat_id"] != target_id]
-        save_state()
-        removed = before - len(STATE["bonus_channels"])
-        send_message(chat_id, f"✅ Olib tashlandi ({removed})." if removed else "Topilmadi.")
-        return {"ok": True}
-
-    if text.startswith("/listbonuschannels"):
-        if not is_admin(user_id):
-            return {"ok": True}
-        channels = get_bonus_channels()
-        if not channels:
-            send_message(chat_id, "Bonus kanallar yo'q.")
-        else:
-            lines = "\n".join(f"• {c['title']} (id:{c['chat_id']})" for c in channels)
-            send_message(chat_id, f"🎁 Bonus kanallar:\n{lines}")
-        return {"ok": True}
-
-    if text.lower().startswith("/reload"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        STATE = load_state()
-        send_message(
-            chat_id,
-            f"🔄 Ma'lumotlar DB guruhidan qayta yuklandi.\n"
-            f"Adminlar: {len(STATE['admins'])}\n"
-            f"Foydalanuvchilar: {len(STATE['users'])}",
-        )
-        return {"ok": True}
-
-    if text.startswith("/addadmin"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /addadmin @username yoki /addadmin user_id")
-            return {"ok": True}
-        target_id = resolve_user_id(parts[1])
-        if not target_id:
-            send_message(chat_id, "Foydalanuvchi topilmadi. ID yoki @username to'g'ri ekanini tekshiring.")
-            return {"ok": True}
-        if target_id not in STATE["admins"]:
-            STATE["admins"].append(target_id)
-            save_state()
-        sync_role_commands(target_id)
-        send_message(chat_id, f"✅ id:{target_id} endi bot admini.")
-        return {"ok": True}
-
-    if text.startswith("/deladmin"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /deladmin @username yoki /deladmin user_id")
-            return {"ok": True}
-        target_id = resolve_user_id(parts[1])
-        if not target_id:
-            send_message(chat_id, "Foydalanuvchi topilmadi.")
-            return {"ok": True}
-        if target_id in STATE["admins"]:
-            STATE["admins"].remove(target_id)
-            save_state()
-        sync_role_commands(target_id)
-        send_message(chat_id, f"❌ id:{target_id} bot adminligidan olindi.")
-        return {"ok": True}
-
-    if text.startswith("/addlimit"):
-        if user_id != SUPERADMIN_ID:
-            return {"ok": True}
-        parts = text.split()
-        if len(parts) < 3:
-            send_message(chat_id, "Foydalanish: /addlimit @username_yoki_id miqdor\nMasalan: /addlimit 123456789 5")
-            return {"ok": True}
-        target_id = resolve_user_id(parts[1])
-        if not target_id:
-            send_message(chat_id, "Foydalanuvchi topilmadi.")
-            return {"ok": True}
-        try:
-            amount = int(parts[2])
-        except ValueError:
-            send_message(chat_id, "Miqdor butun son bo'lishi kerak.")
-            return {"ok": True}
-        record = get_user_record(target_id)
-        record["bonus"] += amount
-        save_state()
-        mode, new_limit = ensure_period_reset(target_id)
-        save_state()
-        period = "kunlik" if mode == "daily" else "haftalik"
-        send_message(chat_id, f"✅ id:{target_id} uchun bonus limit +{amount} qo'shildi. Yangi {period} limit: {new_limit}")
-        return {"ok": True}
-
-    if text.startswith("/broadcast"):
-        if not is_admin(user_id):
-            return {"ok": True}
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /broadcast xabar matni")
-            return {"ok": True}
-        broadcast_text = parts[1]
-        sent = 0
-        for uid in STATE["known_users"]:
-            r = send_message(uid, broadcast_text)
-            if r.get("ok"):
-                sent += 1
-        send_message(chat_id, f"Reklama {sent} ta foydalanuvchiga yuborildi.")
-        return {"ok": True}
-
-    if text.strip() == ".zipstiker":
-        if not is_admin(user_id):
-            return {"ok": True}
-        reply = msg.get("reply_to_message")
-        if not reply:
-            send_message(chat_id, "Sticker/custom emoji xabariga reply qilib .zipstiker yozing.")
-            return {"ok": True}
-        handle_single_sticker_request(chat_id, reply, requester_info, user_id)
-        return {"ok": True}
-
-    if text.startswith("/getpack"):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Foydalanish: /getpack pack_nomi")
-            return {"ok": True}
-        raw = parts[1].strip()
-        if not enforce_force_join(chat_id, user_id):
-            return {"ok": True}
-        pack_name = extract_pack_name_from_link(raw) or raw
-        handle_pack_request(chat_id, pack_name, requester_info, user_id)
+        if user_id == SUPERADMIN_ID:
+            greeting += "\n\n👑 Superadmin sifatida quyida boshqaruv paneliga ham kirishingiz mumkin."
+        send_message(chat_id, greeting, reply_markup=main_menu_keyboard(user_id))
         return {"ok": True}
 
     # ---- Bitta sticker/custom emoji forward qilindi: tanlov beramiz ----
@@ -1698,21 +1631,14 @@ def webhook():
             return {"ok": True}
         pack_name = extract_pack_name_from_message(msg)
         token = store_pending_choice({
-            "pack_name": pack_name,
-            "file_id": file_id,
-            "ext": ext,
-            "emoji_char": emoji_char,
-            "requester_info": requester_info,
+            "pack_name": pack_name, "file_id": file_id, "ext": ext,
+            "emoji_char": emoji_char, "requester_info": requester_info,
         })
         keyboard_rows = []
         if pack_name:
             keyboard_rows.append([{"text": "📦 Butun pack'ni ZIP qilib olish", "callback_data": f"dl_pack:{token}"}])
         keyboard_rows.append([{"text": "💾 Faqat shu stikerni olish", "callback_data": f"dl_single:{token}"}])
-        send_message(
-            chat_id,
-            "Nima qilishimni xohlaysiz?",
-            reply_markup={"inline_keyboard": keyboard_rows},
-        )
+        send_message(chat_id, "Nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
         return {"ok": True}
 
     pack_name = extract_pack_name_from_message(msg)
@@ -1722,7 +1648,8 @@ def webhook():
         handle_pack_request(chat_id, pack_name, requester_info, user_id)
         return {"ok": True}
 
-    send_message(chat_id, "Sticker/emoji forward qiling yoki /getpack pack_nomi yuboring.")
+    send_message(chat_id, "Sticker/emoji forward qiling yoki pastdagi menyudan foydalaning 👇",
+                 reply_markup=main_menu_keyboard(user_id))
     return {"ok": True}
 
 
@@ -1733,7 +1660,11 @@ def health():
 
 def set_webhook():
     url = f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}"
-    result = tg_call("setWebhook", url=url)
+    result = tg_call(
+        "setWebhook", url=url,
+        allowed_updates=["message", "callback_query", "channel_post", "my_chat_member",
+                         "pre_checkout_query"],
+    )
     log.info("Webhook o'rnatildi: %s -> %s", url, result)
 
 
@@ -1746,10 +1677,14 @@ def init_bot_identity():
         log.info("Bot identifikatsiyasi: id=%s username=%s", BOT_ID, BOT_USERNAME)
 
 
-# Gunicorn faylni import qilganda ham ishga tushishi uchun modul darajasida:
+def set_default_commands():
+    """Menyuda faqat /start ko'rinadi — qolgan hammasi inline tugmalar orqali."""
+    tg_call("setMyCommands", commands=[{"command": "start", "description": "Botni ishga tushirish"}])
+
+
 init_bot_identity()
 set_webhook()
-sync_all_role_commands()
+set_default_commands()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
