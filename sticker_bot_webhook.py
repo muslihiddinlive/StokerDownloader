@@ -1171,6 +1171,7 @@ def back_to_panel_keyboard():
 def admin_panel_keyboard(user_id):
     """Oddiy admin — cheklangan panel (ko'rish + broadcast).
     Superadmin — to'liq boshqaruv panelini ko'radi."""
+    is_super = user_id == SUPERADMIN_ID
     rows = [
         [{"text": "👥 Foydalanuvchilar", "callback_data": "panel_users:0"}],
         [
@@ -1181,17 +1182,31 @@ def admin_panel_keyboard(user_id):
             {"text": "🔒 Majburiy kanallar", "callback_data": "panel_forcechannels"},
             {"text": "🎁 Bonus kanallar", "callback_data": "panel_bonuschannels"},
         ],
-        [{"text": "📣 Broadcast", "callback_data": "panel_broadcast"}],
-        [{"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"}],
-        [{"text": "💬 Foydalanuvchiga yozish", "callback_data": "panel_dm_user"}],
     ]
-    if user_id == SUPERADMIN_ID:
-        rows.insert(3, [{"text": "⚙️ Limit sozlamalari", "callback_data": "panel_limits"}])
-        rows.append([{"text": "🛡 Adminlar", "callback_data": "panel_admins"}])
-        rows.append([{"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"}])
-        rows.append([{"text": "🏆 Referal reyting", "callback_data": "panel_leaderboard"}])
-        rows.append([{"text": "📤 Eksport (CSV)", "callback_data": "panel_export"}])
+    if is_super:
+        rows.append([
+            {"text": "⚙️ Limit sozlamalari", "callback_data": "panel_limits"},
+            {"text": "📣 Broadcast", "callback_data": "panel_broadcast"},
+        ])
+        rows.append([
+            {"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"},
+            {"text": "💬 Foydalanuvchiga yozish", "callback_data": "panel_dm_user"},
+        ])
+        rows.append([
+            {"text": "🛡 Adminlar", "callback_data": "panel_admins"},
+            {"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"},
+        ])
+        rows.append([
+            {"text": "🏆 Referal reyting", "callback_data": "panel_leaderboard"},
+            {"text": "📤 Eksport (CSV)", "callback_data": "panel_export"},
+        ])
         rows.append([{"text": "🤖 Bot admin joylar", "callback_data": "panel_botadmin"}])
+    else:
+        rows.append([
+            {"text": "📣 Broadcast", "callback_data": "panel_broadcast"},
+            {"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"},
+        ])
+        rows.append([{"text": "💬 Foydalanuvchiga yozish", "callback_data": "panel_dm_user"}])
     rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
     return {"inline_keyboard": rows}
 
@@ -1458,8 +1473,12 @@ def handle_callback_query(cq):
             ],
         ]
         if user_id == SUPERADMIN_ID:
-            rows.append([{"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"}])
-        rows.append([{"text": "💬 Unga yozish", "callback_data": f"dm_start:{target_id}"}])
+            rows.append([
+                {"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"},
+                {"text": "💬 Unga yozish", "callback_data": f"dm_start:{target_id}"},
+            ])
+        else:
+            rows.append([{"text": "💬 Unga yozish", "callback_data": f"dm_start:{target_id}"}])
         rows.append([{"text": "⬅️ Foydalanuvchilar", "callback_data": "panel_users:0"}])
         keyboard = {"inline_keyboard": rows}
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
