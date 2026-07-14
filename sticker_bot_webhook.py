@@ -1183,6 +1183,7 @@ def admin_panel_keyboard(user_id):
         ],
         [{"text": "📣 Broadcast", "callback_data": "panel_broadcast"}],
         [{"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"}],
+        [{"text": "💬 Foydalanuvchiga yozish", "callback_data": "panel_dm_user"}],
     ]
     if user_id == SUPERADMIN_ID:
         rows.insert(3, [{"text": "⚙️ Limit sozlamalari", "callback_data": "panel_limits"}])
@@ -1458,6 +1459,7 @@ def handle_callback_query(cq):
         ]
         if user_id == SUPERADMIN_ID:
             rows.append([{"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"}])
+        rows.append([{"text": "💬 Unga yozish", "callback_data": f"dm_start:{target_id}"}])
         rows.append([{"text": "⬅️ Foydalanuvchilar", "callback_data": "panel_users:0"}])
         keyboard = {"inline_keyboard": rows}
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
@@ -1601,6 +1603,21 @@ def handle_callback_query(cq):
         text = f"🤖 Bot admin bo'lgan joylar ({len(rows)}):" if rows else "🤖 Bot hali hech qayerda admin emas."
         rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
         safe_edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "panel_dm_user":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "dm_target")
+        safe_edit_or_send(chat_id, message_id, "💬 Xabar yubormoqchi bo'lgan foydalanuvchi ID raqamini yuboring:",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data.startswith("dm_start:"):
+        answer_callback_query(cq_id)
+        target_id = int(data.split(":", 1)[1])
+        set_pending_input(user_id, "dm_text", {"target_id": target_id})
+        safe_edit_or_send(chat_id, message_id, f"💬 {user_label(target_id)}ga yuboriladigan xabarni yozing:",
+                           reply_markup=back_to_panel_keyboard())
         return
 
     if data == "panel_admin_message":
@@ -1871,6 +1888,30 @@ def handle_pending_input(chat_id, user_id, text):
     # Quyidagilar faqat adminlar uchun ishlaydi:
     if not is_admin(user_id):
         clear_pending_input(user_id)
+        return True
+
+    if action == "dm_target":
+        clear_pending_input(user_id)
+        try:
+            target_id = int(text.strip().lstrip("@"))
+        except ValueError:
+            send_message(chat_id, "Butun son (ID) kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        set_pending_input(user_id, "dm_text", {"target_id": target_id})
+        send_message(chat_id, f"💬 {user_label(target_id)}ga yuboriladigan xabarni yozing:",
+                     reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "dm_text":
+        clear_pending_input(user_id)
+        target_id = pending["data"]["target_id"]
+        msg_text = text
+        result = send_message(target_id, msg_text)
+        if result.get("ok"):
+            send_message(chat_id, "✅ Yuborildi.", reply_markup=back_to_panel_keyboard())
+        else:
+            send_message(chat_id, "❌ Yuborib bo'lmadi (foydalanuvchi botni bloklagan bo'lishi mumkin).",
+                         reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "admin_message":
