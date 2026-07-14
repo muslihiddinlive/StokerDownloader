@@ -2337,8 +2337,6 @@ def webhook():
         if is_admin(user_id):
             reaction_kind = "superadmin" if user_id == SUPERADMIN_ID else "admin"
             react(chat_id, msg["message_id"], emoji=get_reaction_emoji_for(reaction_kind))
-        if not bot_is_group_admin(chat_id):
-            return {"ok": True}
         if text.strip().startswith("."):
             if handle_group_dot_commands(msg, chat_id, user_id, text):
                 return {"ok": True}
