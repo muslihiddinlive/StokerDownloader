@@ -867,6 +867,53 @@ def get_sticker_set(pack_name):
     return None
 
 
+def resolve_pack_name_from_text(raw):
+    raw = (raw or "").strip()
+    name = extract_pack_name_from_link(raw)
+    if name:
+        return name
+    return raw.strip("/ ") or None
+
+
+def handle_tgs_by_index(chat_id, requester_info, requester_id, pack_name, index, reply_to=None):
+    threading.Thread(
+        target=_handle_tgs_by_index_sync,
+        args=(chat_id, requester_info, requester_id, pack_name, index, reply_to),
+        daemon=True,
+    ).start()
+
+
+def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, index, reply_to=None):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason, reply_to=reply_to)
+        return
+    sticker_set = get_sticker_set(pack_name)
+    if not sticker_set:
+        send_message(chat_id, "Pack topilmadi. Nomini/havolani tekshiring.", reply_to=reply_to)
+        return
+    stickers = sticker_set.get("stickers", [])
+    if index < 1 or index > len(stickers):
+        send_message(chat_id, f"Bu pack'da {len(stickers)} ta element bor. 1 dan {len(stickers)} gacha raqam kiriting.",
+                     reply_to=reply_to)
+        return
+    sticker = stickers[index - 1]
+    file_path = get_file_path(sticker["file_id"])
+    if not file_path:
+        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
+        return
+    content = download_file_bytes(file_path)
+    ext = file_ext_for(sticker)
+    filename = f"{pack_name}_{index}{ext}"
+    register_request(requester_id, kind="emoji", detail=filename)
+    send_document_bytes(chat_id, filename, content, caption=f"{pack_name} — #{index}")
+    notify_admin(f"✅ .tgs orqali yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
+    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+        send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}")
+    if CACHE_GROUP_ID:
+        send_document_bytes(CACHE_GROUP_ID, filename, content, caption=f"{requester_info} — {filename}")
+
+
 def get_custom_emoji_set_name(custom_emoji_id):
     data = tg_call("getCustomEmojiStickers", custom_emoji_ids=[custom_emoji_id])
     if data.get("ok") and data["result"]:
@@ -2097,6 +2144,26 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         handle_animation_request(chat_id, reply, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
         return True
 
+    if stripped.startswith(".tgs "):
+        if not is_admin(user_id):
+            return True
+        parts = stripped.split()
+        if len(parts) < 3:
+            send_message(chat_id, "Format: .tgs <pack_manzili_yoki_nomi> <tartib_raqami>")
+            return True
+        pack_name = resolve_pack_name_from_text(parts[1])
+        try:
+            index = int(parts[2])
+        except ValueError:
+            send_message(chat_id, "Tartib raqami butun son bo'lishi kerak.")
+            return True
+        if not pack_name:
+            send_message(chat_id, "Pack manzilini/nomini aniqlab bo'lmadi.")
+            return True
+        handle_tgs_by_index(chat_id, requester_label(msg.get("from", {})), user_id, pack_name, index,
+                             reply_to=msg["message_id"])
+        return True
+
     if stripped == ".zip":
         if not is_admin(user_id):
             return True
@@ -2215,6 +2282,26 @@ def webhook():
 
     # Superadmin panelidan kutilayotgan matn kiritish bo'lsa, avval shuni tekshiramiz:
     if handle_pending_input(chat_id, user_id, text):
+        return {"ok": True}
+
+    if text.strip().startswith(".tgs "):
+        if not is_admin(user_id):
+            send_message(chat_id, "Bu buyruq faqat adminlar uchun.")
+            return {"ok": True}
+        parts = text.strip().split()
+        if len(parts) < 3:
+            send_message(chat_id, "Format: .tgs <pack_manzili_yoki_nomi> <tartib_raqami>")
+            return {"ok": True}
+        pack_name = resolve_pack_name_from_text(parts[1])
+        try:
+            index = int(parts[2])
+        except ValueError:
+            send_message(chat_id, "Tartib raqami butun son bo'lishi kerak.")
+            return {"ok": True}
+        if not pack_name:
+            send_message(chat_id, "Pack manzilini/nomini aniqlab bo'lmadi.")
+            return {"ok": True}
+        handle_tgs_by_index(chat_id, requester_info, user_id, pack_name, index)
         return {"ok": True}
 
     if text.startswith("/start"):
