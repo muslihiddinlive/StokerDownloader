@@ -255,51 +255,115 @@ def default_user_record():
         "lifetime_requests": 0,
         "username": None,
         "first_name": None,
+        "type_counts": {"sticker": 0, "emoji": 0, "gif": 0, "pack": 0},
+        "history": [],
         "first_seen": None,
     }
 
 
+def get_file_path(file_id):
+    data = tg_call("getFile", file_id=file_id)
+    if data.get("ok"):
+        return data["result"]["file_path"]
+    return None
+
+
+def download_file_bytes(file_path):
+    resp = requests.get(f"{FILE_BASE}/{file_path}", timeout=60)
+    resp.raise_for_status()
+    return resp.content
+
+
+def _merge_with_defaults(loaded):
+    merged = default_state()
+    merged.update(loaded)
+    # ichki dictlarni ham to'ldirish (yangi kalitlar bo'lsa)
+    for key in ("config",):
+        d = default_state()[key]
+        d.update(merged.get(key, {}))
+        merged[key] = d
+    for key in ("groups", "channels"):
+        merged.setdefault(key, {})
+    return merged
+
+
 def load_state():
+    """DB guruhga pinlangan JSON FAYL (document) orqali o'qiydi. Matn xabar
+    formatidagi eski holatni ham (migratsiya uchun) o'qiy oladi — birinchi
+    save_state chaqirilganda avtomatik fayl formatiga o'tkaziladi."""
     global _pinned_message_id
     data = tg_call("getChat", chat_id=DB_GROUP_ID)
-    if data.get("ok"):
-        pinned = data["result"].get("pinned_message")
-        if pinned and pinned.get("text"):
-            _pinned_message_id = pinned["message_id"]
+    if not data.get("ok"):
+        return default_state()
+    pinned = data["result"].get("pinned_message")
+    if not pinned:
+        return default_state()
+    _pinned_message_id = pinned["message_id"]
+
+    document = pinned.get("document")
+    if document:
+        file_path = get_file_path(document["file_id"])
+        if file_path:
             try:
-                loaded = json.loads(pinned["text"])
-                merged = default_state()
-                merged.update(loaded)
-                # ichki dictlarni ham to'ldirish (yangi kalitlar bo'lsa)
-                for key in ("config",):
-                    d = default_state()[key]
-                    d.update(merged.get(key, {}))
-                    merged[key] = d
-                for key in ("groups", "channels"):
-                    merged.setdefault(key, {})
-                return merged
-            except (json.JSONDecodeError, TypeError):
-                log.warning("DB xabari JSON emas, yangi state yaratiladi.")
+                raw = download_file_bytes(file_path)
+                loaded = json.loads(raw.decode("utf-8"))
+                return _merge_with_defaults(loaded)
+            except (json.JSONDecodeError, UnicodeDecodeError, requests.RequestException) as exc:
+                log.warning("DB faylini o'qib bo'lmadi (%s), yangi state yaratiladi.", exc)
+                return default_state()
+
+    if pinned.get("text"):
+        try:
+            loaded = json.loads(pinned["text"])
+            log.info("Eski matnli DB formati topildi — birinchi saqlashda faylga migratsiya qilinadi.")
+            return _merge_with_defaults(loaded)
+        except (json.JSONDecodeError, TypeError):
+            log.warning("DB xabari JSON emas, yangi state yaratiladi.")
+
     return default_state()
 
 
 STATE = load_state()
 
 
+def _upload_state_document(method_extra_fields=None, message_id=None):
+    """STATE'ni JSON fayl sifatida DB guruhga yuboradi/yangilaydi.
+    Qaytaradi: (ok, response_dict)"""
+    payload = json.dumps(STATE, ensure_ascii=False).encode("utf-8")
+    files = {"document": ("state.json", payload, "application/json")}
+    if message_id:
+        media = json.dumps({"type": "document", "media": "attach://document"})
+        form = {"chat_id": DB_GROUP_ID, "message_id": message_id, "media": media}
+        resp = requests.post(f"{API_BASE}/editMessageMedia", data=form, files=files, timeout=30)
+    else:
+        form = {"chat_id": DB_GROUP_ID}
+        resp = requests.post(f"{API_BASE}/sendDocument", data=form, files=files, timeout=30)
+    try:
+        result = resp.json()
+    except ValueError:
+        log.error("STATE yuklashda JSON bo'lmagan javob: %s", resp.text[:300])
+        return False, {}
+    return result.get("ok", False), result
+
+
 def save_state_locked():
-    """_state_lock ALLAQACHON ushlanган holatda chaqirilishi kerak."""
+    """_state_lock ALLAQACHON ushlanган holatda chaqirilishi kerak.
+    STATE'ni pinlangan JSON FAYL (document) sifatida DB guruhga saqlaydi —
+    matnli xabardagi 4096 belgi chegarasidan xoli, ma'lumot qancha katta
+    bo'lmasin ishlayveradi."""
     global _pinned_message_id
-    text = json.dumps(STATE, ensure_ascii=False)
     if _pinned_message_id:
-        result = tg_call(
-            "editMessageText", chat_id=DB_GROUP_ID, message_id=_pinned_message_id, text=text,
-        )
-        if result.get("ok"):
+        ok, result = _upload_state_document(message_id=_pinned_message_id)
+        if ok:
             return
-    result = tg_call("sendMessage", chat_id=DB_GROUP_ID, text=text)
-    if result.get("ok"):
+        log.warning("editMessageMedia muvaffaqiyatsiz (%s), yangi fayl yuboriladi.", result)
+
+    ok, result = _upload_state_document()
+    if ok:
         _pinned_message_id = result["result"]["message_id"]
         tg_call("pinChatMessage", chat_id=DB_GROUP_ID, message_id=_pinned_message_id, disable_notification=True)
+    else:
+        log.error("STATE saqlashda xato: %s", result)
 
 
 def save_state():
@@ -624,10 +688,20 @@ def can_make_request(user_id):
     return True, None
 
 
-def register_request(user_id):
+def register_request(user_id, kind=None, detail=None):
     with _state_lock:
         record = get_user_record(user_id)
         record["lifetime_requests"] = record.get("lifetime_requests", 0) + 1
+        if kind:
+            counts = record.setdefault("type_counts", {"sticker": 0, "emoji": 0, "gif": 0, "pack": 0})
+            counts[kind] = counts.get(kind, 0) + 1
+            history = record.setdefault("history", [])
+            history.append({
+                "type": kind, "detail": detail or "",
+                "at": datetime.now(timezone.utc).isoformat(),
+            })
+            if len(history) > 50:
+                del history[: len(history) - 50]
         stats = STATE.setdefault("stats", {"total_requests": 0})
         stats["total_requests"] = stats.get("total_requests", 0) + 1
         if is_admin(user_id) or is_premium(user_id):
@@ -778,19 +852,6 @@ def get_custom_emoji_set_name(custom_emoji_id):
     return None
 
 
-def get_file_path(file_id):
-    data = tg_call("getFile", file_id=file_id)
-    if data.get("ok"):
-        return data["result"]["file_path"]
-    return None
-
-
-def download_file_bytes(file_path):
-    resp = requests.get(f"{FILE_BASE}/{file_path}", timeout=60)
-    resp.raise_for_status()
-    return resp.content
-
-
 def file_ext_for(sticker):
     if sticker.get("is_animated"):
         return ".tgs"
@@ -860,7 +921,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
                 chat_id, cached["file_id"], caption=f"{cached['sticker_count']} ta fayl topildi. (kesh)"
             )
             if result.get("ok"):
-                register_request(requester_id)
+                register_request(requester_id, kind="pack", detail=pack_name)
                 notify_admin(f"✅ So'rov keshdan bajarildi\nKimdan: {requester_info}\nPack: {pack_name}")
                 if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
                     send_document_by_file_id(
@@ -879,7 +940,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
         notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: {result}")
         return
 
-    register_request(requester_id)
+    register_request(requester_id, kind="pack", detail=pack_name)
     zip_bytes = buf.getvalue()
     send_result = send_document_bytes(chat_id, f"{pack_name}.zip", zip_bytes, caption=f"{result} ta fayl topildi.")
 
@@ -951,7 +1012,7 @@ def extract_animation_file(msg):
 def extract_single_sticker_file(msg):
     sticker = msg.get("sticker")
     if sticker:
-        return sticker["file_id"], file_ext_for(sticker), sticker.get("emoji", "")
+        return sticker["file_id"], file_ext_for(sticker), sticker.get("emoji", ""), "sticker"
     for field, entity_field in (("text", "entities"), ("caption", "caption_entities")):
         entities = msg.get(entity_field) or []
         for ent in entities:
@@ -959,8 +1020,8 @@ def extract_single_sticker_file(msg):
                 data = tg_call("getCustomEmojiStickers", custom_emoji_ids=[ent["custom_emoji_id"]])
                 if data.get("ok") and data["result"]:
                     em = data["result"][0]
-                    return em["file_id"], file_ext_for(em), em.get("emoji", "")
-    return None, None, None
+                    return em["file_id"], file_ext_for(em), em.get("emoji", ""), "emoji"
+    return None, None, None, None
 
 
 def zip_single_file(filename, content):
@@ -984,7 +1045,7 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
     if not allowed:
         send_message(chat_id, reason, reply_to=reply_to)
         return
-    file_id, ext, emoji_char = extract_single_sticker_file(reply)
+    file_id, ext, emoji_char, kind = extract_single_sticker_file(reply)
     if not file_id:
         send_message(chat_id, "Bu xabarda sticker/custom emoji topilmadi.", reply_to=reply_to)
         return
@@ -993,14 +1054,16 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
         send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
         return
     content = download_file_bytes(file_path)
-    register_request(requester_id)
     filename = f"sticker_{emoji_char}{ext}".replace("/", "_")
+    register_request(requester_id, kind=kind, detail=filename)
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
     send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
     notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker")
+    if CACHE_GROUP_ID:
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker")
 
 
 def handle_single_sticker_request_from_pending(chat_id, pending, requester_id):
@@ -1021,14 +1084,16 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
         send_message(chat_id, "Faylni olishda xato yuz berdi.")
         return
     content = download_file_bytes(file_path)
-    register_request(requester_id)
     filename = f"sticker_{pending['emoji_char']}{pending['ext']}".replace("/", "_")
+    register_request(requester_id, kind=pending.get("kind", "sticker"), detail=filename)
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
     send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
     notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {pending['requester_info']}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
+    if CACHE_GROUP_ID:
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
 
 
 def handle_animation_request(chat_id, msg, requester_info, requester_id, reply_to=None):
@@ -1053,14 +1118,16 @@ def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, r
         send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
         return
     content = download_file_bytes(file_path)
-    register_request(requester_id)
     filename = f"gif_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+    register_request(requester_id, kind="gif", detail=filename)
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
     send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
     notify_admin(f"✅ GIF yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF")
+    if CACHE_GROUP_ID:
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF")
 
 
 def requester_label(from_user):
@@ -1348,14 +1415,54 @@ def handle_callback_query(cq):
         answer_callback_query(cq_id)
         target_id = int(data.split(":", 1)[1])
         rec = get_user_record(target_id)
-        pretty = json.dumps(rec, ensure_ascii=False, indent=2)
-        text = f"👤 <b>id:{target_id}</b>\n<pre>{pretty}</pre>"
-        rows = []
+        counts = rec.get("type_counts", {}) or {}
+        premium_label = "ha" if is_premium(target_id) else "yoq"
+        text = (
+            f"👤 <b>{user_label(target_id)}</b> (id:{target_id})\n\n"
+            f"📊 Jami so'rovlar: {rec.get('lifetime_requests', 0)}\n"
+            f"🖼 Sticker: {counts.get('sticker', 0)}\n"
+            f"😀 Custom emoji: {counts.get('emoji', 0)}\n"
+            f"🎞 GIF: {counts.get('gif', 0)}\n"
+            f"📦 Pack: {counts.get('pack', 0)}\n\n"
+            f"🔗 Referallar: {rec.get('referrals', 0)}\n"
+            f"🎁 Bonus: {rec.get('bonus', 0)}\n"
+            f"⭐ Premium: {premium_label}\n"
+        )
+        rows = [
+            [
+                {"text": f"🖼 Sticker ({counts.get('sticker', 0)})", "callback_data": f"user_history:{target_id}:sticker"},
+                {"text": f"😀 Emoji ({counts.get('emoji', 0)})", "callback_data": f"user_history:{target_id}:emoji"},
+            ],
+            [
+                {"text": f"🎞 GIF ({counts.get('gif', 0)})", "callback_data": f"user_history:{target_id}:gif"},
+                {"text": f"📦 Pack ({counts.get('pack', 0)})", "callback_data": f"user_history:{target_id}:pack"},
+            ],
+        ]
         if user_id == SUPERADMIN_ID:
             rows.append([{"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"}])
         rows.append([{"text": "⬅️ Foydalanuvchilar", "callback_data": "panel_users:0"}])
         keyboard = {"inline_keyboard": rows}
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data.startswith("user_history:"):
+        answer_callback_query(cq_id)
+        _, target_id_str, kind = data.split(":", 2)
+        target_id = int(target_id_str)
+        rec = get_user_record(target_id)
+        history = [h for h in (rec.get("history") or []) if h.get("type") == kind]
+        history = list(reversed(history))[:20]
+        kind_labels = {"sticker": "🖼 Sticker", "emoji": "😀 Custom emoji", "gif": "🎞 GIF", "pack": "📦 Pack"}
+        if not history:
+            text = f"{kind_labels.get(kind, kind)} bo'yicha hali so'rov yo'q."
+        else:
+            lines = [f"{kind_labels.get(kind, kind)} tarixi ({user_label(target_id)}):\n"]
+            for h in history:
+                at = (h.get("at") or "")[:16].replace("T", " ")
+                lines.append(f"• {h.get('detail') or '—'}  ({at})")
+            text = "\n".join(lines)
+        keyboard = {"inline_keyboard": [[{"text": "⬅️ Orqaga", "callback_data": f"user_detail:{target_id}"}]]}
+        safe_edit_or_send(chat_id, message_id, text, reply_markup=keyboard)
         return
 
     if data.startswith("give_limit:"):
@@ -1998,14 +2105,14 @@ def webhook():
         return {"ok": True}
 
     # ---- Bitta sticker/custom emoji forward qilindi: tanlov beramiz ----
-    file_id, ext, emoji_char = extract_single_sticker_file(msg)
+    file_id, ext, emoji_char, sticker_kind = extract_single_sticker_file(msg)
     if file_id:
         if not enforce_force_join(chat_id, user_id):
             return {"ok": True}
         pack_name = extract_pack_name_from_message(msg)
         token = store_pending_choice({
             "pack_name": pack_name, "file_id": file_id, "ext": ext,
-            "emoji_char": emoji_char, "requester_info": requester_info,
+            "emoji_char": emoji_char, "requester_info": requester_info, "kind": sticker_kind,
         })
         keyboard_rows = []
         if pack_name:
