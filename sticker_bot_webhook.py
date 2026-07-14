@@ -1342,12 +1342,30 @@ def handle_callback_query(cq):
         top = get_referral_leaderboard(10)
         if not top:
             text = "🏆 <b>Referal reyting</b>\n\nHali hech kim referal orqali taklif qilmagan."
+            rows = []
         else:
-            lines = ["🏆 <b>Top referallar</b>\n"]
-            for i, (uid, refs, _lifetime) in enumerate(top, start=1):
-                lines.append(f"{i}. {user_label(uid)} — {refs} ta referal")
-            text = "\n".join(lines)
-        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=back_to_menu_keyboard())
+            text = "🏆 <b>Top referallar</b>\n\nKo'proq ma'lumot uchun foydalanuvchi ustiga bosing:"
+            rows = [[{"text": f"{i}. {user_label(uid)} — {refs} ta referal",
+                      "callback_data": f"pub_stats:{uid}"}]
+                    for i, (uid, refs, _lifetime) in enumerate(top, start=1)]
+        rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("pub_stats:"):
+        answer_callback_query(cq_id)
+        target_id = int(data.split(":", 1)[1])
+        rec = get_user_record(target_id)
+        counts = rec.get("type_counts", {}) or {}
+        text = (
+            f"👤 <b>{user_label(target_id)}</b>\n\n"
+            f"🔗 Referallar: {rec.get('referrals', 0)}\n"
+            f"📊 Jami so'rovlar: {rec.get('lifetime_requests', 0)}\n"
+            f"🖼 Sticker: {counts.get('sticker', 0)}  😀 Emoji: {counts.get('emoji', 0)}\n"
+            f"🎞 GIF: {counts.get('gif', 0)}  📦 Pack: {counts.get('pack', 0)}\n"
+        )
+        keyboard = {"inline_keyboard": [[{"text": "⬅️ Reyting", "callback_data": "menu_leaderboard"}]]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
     if data == "check_force_join":
