@@ -254,6 +254,7 @@ def default_user_record():
         "claimed_bonus_channels": [],
         "lifetime_requests": 0,
         "username": None,
+        "first_name": None,
         "first_seen": None,
     }
 
@@ -322,6 +323,39 @@ def get_limit_config():
         cfg.setdefault("weekly_cap", 7)
         cfg.setdefault("reaction_emoji", DEFAULT_REACTION_EMOJI)
         return dict(cfg)
+
+
+def get_referral_leaderboard(top_n=10):
+    with _state_lock:
+        users = dict(STATE["users"])
+    rows = []
+    for uid, rec in users.items():
+        refs = rec.get("referrals", 0)
+        if refs > 0:
+            rows.append((int(uid), refs, rec.get("lifetime_requests", 0)))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    return rows[:top_n]
+
+
+def build_users_csv():
+    import csv
+    with _state_lock:
+        users = dict(STATE["users"])
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "user_id", "username", "first_name", "referrals", "referred_by",
+        "count", "mode", "bonus", "lifetime_requests", "premium_until", "first_seen",
+    ])
+    for uid, rec in users.items():
+        writer.writerow([
+            uid, rec.get("username") or "", rec.get("first_name") or "",
+            rec.get("referrals", 0), rec.get("referred_by") or "",
+            rec.get("count", 0), rec.get("mode") or "", rec.get("bonus", 0),
+            rec.get("lifetime_requests", 0), rec.get("premium_until") or "",
+            rec.get("first_seen") or "",
+        ])
+    return buf.getvalue().encode("utf-8")
 
 
 def get_reaction_emoji():
@@ -613,7 +647,19 @@ def register_known_user(user_id, from_user=None):
             record["first_seen"] = datetime.now(timezone.utc).isoformat()
         if from_user and from_user.get("username"):
             record["username"] = from_user["username"]
+        if from_user and from_user.get("first_name"):
+            record["first_name"] = from_user["first_name"]
         save_state_locked()
+
+
+def user_label(uid):
+    """Foydalanuvchi uchun o'qiladigan yorliq: @username, bo'lmasa ism, bo'lmasa id."""
+    rec = get_user_record(uid)
+    if rec.get("username"):
+        return f"@{rec['username']}"
+    if rec.get("first_name"):
+        return rec["first_name"]
+    return f"id:{uid}"
 
 
 def register_referral(new_user_id, referrer_id):
@@ -1026,6 +1072,7 @@ def main_menu_keyboard(user_id):
             {"text": "⭐ Premium", "callback_data": "menu_premium"},
         ],
         [{"text": "❓ Yordam", "callback_data": "menu_help"}],
+        [{"text": "🏆 Reyting", "callback_data": "menu_leaderboard"}],
     ]
     if is_admin(user_id):
         rows.append([{"text": "👑 Superadmin panel" if user_id == SUPERADMIN_ID else "🛠 Admin panel",
@@ -1055,11 +1102,15 @@ def admin_panel_keyboard(user_id):
             {"text": "🎁 Bonus kanallar", "callback_data": "panel_bonuschannels"},
         ],
         [{"text": "📣 Broadcast", "callback_data": "panel_broadcast"}],
+        [{"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"}],
     ]
     if user_id == SUPERADMIN_ID:
         rows.insert(3, [{"text": "⚙️ Limit sozlamalari", "callback_data": "panel_limits"}])
         rows.append([{"text": "🛡 Adminlar", "callback_data": "panel_admins"}])
         rows.append([{"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"}])
+        rows.append([{"text": "🏆 Referal reyting", "callback_data": "panel_leaderboard"}])
+        rows.append([{"text": "📤 Eksport (CSV)", "callback_data": "panel_export"}])
+        rows.append([{"text": "🤖 Bot admin joylar", "callback_data": "panel_botadmin"}])
     rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
     return {"inline_keyboard": rows}
 
@@ -1206,6 +1257,19 @@ def handle_callback_query(cq):
         )
         return
 
+    if data == "menu_leaderboard":
+        answer_callback_query(cq_id)
+        top = get_referral_leaderboard(10)
+        if not top:
+            text = "🏆 <b>Referal reyting</b>\n\nHali hech kim referal orqali taklif qilmagan."
+        else:
+            lines = ["🏆 <b>Top referallar</b>\n"]
+            for i, (uid, refs, _lifetime) in enumerate(top, start=1):
+                lines.append(f"{i}. {user_label(uid)} — {refs} ta referal")
+            text = "\n".join(lines)
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=back_to_menu_keyboard())
+        return
+
     if data == "check_force_join":
         missing = missing_force_channels(user_id)
         if missing:
@@ -1261,8 +1325,7 @@ def handle_callback_query(cq):
             uids = list(STATE["known_users"])
         items = []
         for uid in uids:
-            rec = get_user_record(uid)
-            label = f"@{rec['username']}" if rec.get("username") else f"id:{uid}"
+            label = user_label(uid)
             items.append((uid, label))
         safe_edit_or_send(chat_id, message_id, f"👥 Foydalanuvchilar ({len(items)}):",
                            reply_markup=_paginate_keyboard(items, "user_detail", page))
@@ -1353,6 +1416,89 @@ def handle_callback_query(cq):
             )
         else:
             send_message(user_id, "Taklif havolasini yaratib bo'lmadi — bot shu chatda admin ekanini tekshiring.")
+        return
+
+    if data == "panel_leaderboard":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        top = get_referral_leaderboard(15)
+        if not top:
+            text = "🏆 Hali hech kim referal orqali taklif qilmagan."
+            rows = []
+        else:
+            lines = ["🏆 <b>Referal reyting (to'liq)</b>\n"]
+            rows = []
+            for i, (uid, refs, lifetime) in enumerate(top, start=1):
+                lines.append(f"{i}. {user_label(uid)} — {refs} referal, {lifetime} so'rov")
+                rows.append([{"text": f"{i}. {user_label(uid)}", "callback_data": f"user_detail:{uid}"}])
+            text = "\n".join(lines)
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "panel_export":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        csv_bytes = build_users_csv()
+        fname = f"users_export_{today_str()}.csv"
+        send_document_bytes(chat_id, fname, csv_bytes, caption="📤 Foydalanuvchilar eksporti (CSV).")
+        return
+
+    if data == "panel_botadmin":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        with _state_lock:
+            groups = dict(STATE.get("groups", {}))
+            channels = dict(STATE.get("channels", {}))
+        rows = []
+        for gid, info in groups.items():
+            if bot_is_group_admin(int(gid)):
+                rows.append([{"text": f"👨‍👩‍👧 {info.get('title', gid)}", "callback_data": f"group_detail:{gid}"}])
+        for cid, info in channels.items():
+            if bot_is_group_admin(int(cid)):
+                rows.append([{"text": f"📢 {info.get('title', cid)}", "callback_data": f"channel_detail:{cid}"}])
+        text = f"🤖 Bot admin bo'lgan joylar ({len(rows)}):" if rows else "🤖 Bot hali hech qayerda admin emas."
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "panel_admin_message":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "admin_message")
+        hint = ("Superadmin sifatida xabaringiz to'g'ridan-to'g'ri barcha adminlarga yuboriladi."
+                if user_id == SUPERADMIN_ID else
+                "Xabaringiz avval superadminga tasdiq uchun boradi, u ruxsat bersa boshqa adminlarga yuboriladi.")
+        safe_edit_or_send(chat_id, message_id, f"✍️ Xabaringizni yozing.\n\n{hint}",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data.startswith("adminmsg_ok:") or data.startswith("adminmsg_no:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        approve = data.startswith("adminmsg_ok:")
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu so'rov muddati o'tgan yoki allaqachon ko'rib chiqilgan.")
+            return
+        if approve:
+            with _state_lock:
+                targets = [a for a in STATE["admins"] if a != pending["from_id"]]
+            sent = 0
+            for aid in targets:
+                r = send_message(aid, f"✉️ <b>{pending['from_label']}</b> dan xabar:\n\n{pending['text']}",
+                                  parse_mode_html=True)
+                if r.get("ok"):
+                    sent += 1
+            edit_message_text(chat_id, message_id, f"✅ Tasdiqlandi. Xabar {sent} ta adminga yuborildi.")
+            send_message(pending["from_id"], f"✅ Xabaringiz superadmin tomonidan tasdiqlandi va {sent} ta adminga yuborildi.")
+        else:
+            edit_message_text(chat_id, message_id, "❌ Rad etildi.")
+            send_message(pending["from_id"], "❌ Xabaringiz superadmin tomonidan rad etildi.")
         return
 
     if data == "panel_limits":
@@ -1587,6 +1733,33 @@ def handle_pending_input(chat_id, user_id, text):
     # Quyidagilar faqat adminlar uchun ishlaydi:
     if not is_admin(user_id):
         clear_pending_input(user_id)
+        return True
+
+    if action == "admin_message":
+        clear_pending_input(user_id)
+        msg_text = text.strip()
+        if not msg_text:
+            send_message(chat_id, "Bo'sh xabar yuborib bo'lmaydi. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        sender_label = user_label(user_id)
+        if user_id == SUPERADMIN_ID:
+            with _state_lock:
+                targets = list(STATE["admins"])
+            sent = 0
+            for aid in targets:
+                r = send_message(aid, f"✉️ <b>Superadmindan xabar:</b>\n\n{msg_text}", parse_mode_html=True)
+                if r.get("ok"):
+                    sent += 1
+            send_message(chat_id, f"✅ Xabaringiz {sent} ta adminga yuborildi.", reply_markup=back_to_panel_keyboard())
+        else:
+            token = store_pending_choice({"from_id": user_id, "from_label": sender_label, "text": msg_text})
+            keyboard = {"inline_keyboard": [[
+                {"text": "✅ Ruxsat berish", "callback_data": f"adminmsg_ok:{token}"},
+                {"text": "❌ Rad etish", "callback_data": f"adminmsg_no:{token}"},
+            ]]}
+            send_message(SUPERADMIN_ID, f"✉️ <b>{sender_label}</b> boshqa adminlarga xabar yubormoqchi:\n\n{msg_text}",
+                         parse_mode_html=True, reply_markup=keyboard)
+            send_message(chat_id, "📨 Xabaringiz superadminga tasdiq uchun yuborildi.", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "give_limit_amount":
