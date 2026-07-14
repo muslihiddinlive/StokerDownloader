@@ -1605,11 +1605,30 @@ def handle_callback_query(cq):
         safe_edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
         return
 
-    if data == "panel_dm_user":
+    if data.startswith("panel_dm_user"):
         answer_callback_query(cq_id)
-        set_pending_input(user_id, "dm_target")
-        safe_edit_or_send(chat_id, message_id, "💬 Xabar yubormoqchi bo'lgan foydalanuvchi ID raqamini yuboring:",
-                           reply_markup=back_to_panel_keyboard())
+        page = 0
+        if ":" in data:
+            try:
+                page = int(data.split(":", 1)[1])
+            except ValueError:
+                page = 0
+        with _state_lock:
+            uids = list(STATE["known_users"])
+        items = [(uid, user_label(uid)) for uid in uids]
+        start = page * PAGE_SIZE
+        chunk = items[start:start + PAGE_SIZE]
+        rows = [[{"text": label, "callback_data": f"dm_start:{uid}"}] for uid, label in chunk]
+        nav = []
+        if page > 0:
+            nav.append({"text": "⬅️", "callback_data": f"panel_dm_user:{page - 1}"})
+        if start + PAGE_SIZE < len(items):
+            nav.append({"text": "➡️", "callback_data": f"panel_dm_user:{page + 1}"})
+        if nav:
+            rows.append(nav)
+        rows.append([{"text": "⬅️ Admin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"💬 Kimga xabar yubormoqchisiz? ({len(items)} foydalanuvchi)",
+                           reply_markup={"inline_keyboard": rows})
         return
 
     if data.startswith("dm_start:"):
@@ -1888,18 +1907,6 @@ def handle_pending_input(chat_id, user_id, text):
     # Quyidagilar faqat adminlar uchun ishlaydi:
     if not is_admin(user_id):
         clear_pending_input(user_id)
-        return True
-
-    if action == "dm_target":
-        clear_pending_input(user_id)
-        try:
-            target_id = int(text.strip().lstrip("@"))
-        except ValueError:
-            send_message(chat_id, "Butun son (ID) kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
-            return True
-        set_pending_input(user_id, "dm_text", {"target_id": target_id})
-        send_message(chat_id, f"💬 {user_label(target_id)}ga yuboriladigan xabarni yozing:",
-                     reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "dm_text":
