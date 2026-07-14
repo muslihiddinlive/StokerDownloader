@@ -2088,6 +2088,15 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         handle_single_sticker_request(chat_id, reply, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
         return True
 
+    if stripped == ".zipgif":
+        if not is_admin(user_id):
+            return True
+        if not reply:
+            send_message(chat_id, "GIF xabariga reply qilib .zipgif yozing.")
+            return True
+        handle_animation_request(chat_id, reply, requester_label(msg.get("from", {})), user_id, reply_to=msg["message_id"])
+        return True
+
     if stripped == ".zip":
         if not is_admin(user_id):
             return True
