@@ -234,6 +234,8 @@ def default_state():
             "base_weekly": 7,
             "weekly_cap": 7,
             "reaction_emoji": DEFAULT_REACTION_EMOJI,
+            "superadmin_reaction_emoji": DEFAULT_REACTION_EMOJI,
+            "channel_reaction_emoji": DEFAULT_REACTION_EMOJI,
         },
         "force_channels": [],
         "bonus_channels": [],
@@ -386,6 +388,8 @@ def get_limit_config():
         cfg.setdefault("base_weekly", 7)
         cfg.setdefault("weekly_cap", 7)
         cfg.setdefault("reaction_emoji", DEFAULT_REACTION_EMOJI)
+        cfg.setdefault("superadmin_reaction_emoji", DEFAULT_REACTION_EMOJI)
+        cfg.setdefault("channel_reaction_emoji", DEFAULT_REACTION_EMOJI)
         return dict(cfg)
 
 
@@ -422,14 +426,32 @@ def build_users_csv():
     return buf.getvalue().encode("utf-8")
 
 
+REACTION_KIND_CONFIG = {
+    "admin": ("reaction_emoji", "👤 Admin (guruh) reaksiyasi"),
+    "superadmin": ("superadmin_reaction_emoji", "👑 Superadmin (guruh) reaksiyasi"),
+    "channel": ("channel_reaction_emoji", "📢 Kanal posti reaksiyasi"),
+}
+
+
+def get_reaction_emoji_for(kind):
+    key, _ = REACTION_KIND_CONFIG[kind]
+    return get_limit_config().get(key, DEFAULT_REACTION_EMOJI)
+
+
+def set_reaction_emoji_for(kind, emoji):
+    key, _ = REACTION_KIND_CONFIG[kind]
+    with _state_lock:
+        STATE.setdefault("config", {})[key] = emoji
+        save_state_locked()
+
+
 def get_reaction_emoji():
-    return get_limit_config().get("reaction_emoji", DEFAULT_REACTION_EMOJI)
+    """Eski nom bilan moslik uchun — guruhdagi oddiy admin reaksiyasi."""
+    return get_reaction_emoji_for("admin")
 
 
 def set_reaction_emoji(emoji):
-    with _state_lock:
-        STATE.setdefault("config", {})["reaction_emoji"] = emoji
-        save_state_locked()
+    set_reaction_emoji_for("admin", emoji)
 
 
 def set_base_weekly(value):
@@ -1873,12 +1895,24 @@ def handle_callback_query(cq):
         answer_callback_query(cq_id)
         if user_id != SUPERADMIN_ID:
             return
-        current = get_reaction_emoji()
-        rows = [[{"text": (f"✅ {e}" if e == current else e), "callback_data": f"set_reaction:{e}"}]
-                for e in REACTION_EMOJI_CHOICES]
+        rows = [[{"text": label, "callback_data": f"panel_reaction_kind:{kind}"}]
+                for kind, (_, label) in REACTION_KIND_CONFIG.items()]
         rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
-        safe_edit_or_send(chat_id, message_id,
-                           f"⚡ Guruh/kanallardagi reaksiya emojisi (hozirgi: {current}):",
+        safe_edit_or_send(chat_id, message_id, "⚡ Qaysi reaksiyani sozlaysiz?",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("panel_reaction_kind:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        kind = data.split(":", 1)[1]
+        current = get_reaction_emoji_for(kind)
+        _, label = REACTION_KIND_CONFIG[kind]
+        rows = [[{"text": (f"✅ {e}" if e == current else e), "callback_data": f"set_reaction:{kind}:{e}"}]
+                for e in REACTION_EMOJI_CHOICES]
+        rows.append([{"text": "⬅️ Orqaga", "callback_data": "panel_reaction"}])
+        safe_edit_or_send(chat_id, message_id, f"{label} (hozirgi: {current}):",
                            reply_markup={"inline_keyboard": rows})
         return
 
@@ -1886,12 +1920,13 @@ def handle_callback_query(cq):
         answer_callback_query(cq_id)
         if user_id != SUPERADMIN_ID:
             return
-        emoji = data.split(":", 1)[1]
-        set_reaction_emoji(emoji)
-        rows = [[{"text": (f"✅ {e}" if e == emoji else e), "callback_data": f"set_reaction:{e}"}]
+        _, kind, emoji = data.split(":", 2)
+        set_reaction_emoji_for(kind, emoji)
+        _, label = REACTION_KIND_CONFIG[kind]
+        rows = [[{"text": (f"✅ {e}" if e == emoji else e), "callback_data": f"set_reaction:{kind}:{e}"}]
                 for e in REACTION_EMOJI_CHOICES]
-        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
-        safe_edit_or_send(chat_id, message_id, f"⚡ Reaksiya emoji o'rnatildi: {emoji}",
+        rows.append([{"text": "⬅️ Orqaga", "callback_data": "panel_reaction"}])
+        safe_edit_or_send(chat_id, message_id, f"✅ {label} o'rnatildi: {emoji}",
                            reply_markup={"inline_keyboard": rows})
         return
 
@@ -2123,7 +2158,7 @@ def webhook():
         chat_id = channel_post["chat"]["id"]
         register_channel(channel_post["chat"])
         if bot_is_group_admin(chat_id):
-            react(chat_id, channel_post["message_id"])
+            react(chat_id, channel_post["message_id"], emoji=get_reaction_emoji_for("channel"))
         return {"ok": True}
 
     pre_checkout_query = update.get("pre_checkout_query")
@@ -2155,10 +2190,11 @@ def webhook():
 
     if is_group:
         register_group(msg["chat"])
+        if is_admin(user_id):
+            reaction_kind = "superadmin" if user_id == SUPERADMIN_ID else "admin"
+            react(chat_id, msg["message_id"], emoji=get_reaction_emoji_for(reaction_kind))
         if not bot_is_group_admin(chat_id):
             return {"ok": True}
-        if is_admin(user_id):
-            react(chat_id, msg["message_id"])
         if text.strip().startswith("."):
             if handle_group_dot_commands(msg, chat_id, user_id, text):
                 return {"ok": True}
