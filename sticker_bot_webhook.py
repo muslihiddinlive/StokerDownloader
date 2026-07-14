@@ -881,6 +881,14 @@ def extract_pack_name_from_message(msg):
     return None
 
 
+def extract_animation_file(msg):
+    """Telegram GIF'lari 'animation' obyekti sifatida keladi (odatda mime_type=video/mp4)."""
+    animation = msg.get("animation")
+    if animation:
+        return animation["file_id"], ".mp4"
+    return None, None
+
+
 def extract_single_sticker_file(msg):
     sticker = msg.get("sticker")
     if sticker:
@@ -962,6 +970,38 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
     notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {pending['requester_info']}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
+
+
+def handle_animation_request(chat_id, msg, requester_info, requester_id, reply_to=None):
+    threading.Thread(
+        target=_handle_animation_request_sync,
+        args=(chat_id, msg, requester_info, requester_id, reply_to),
+        daemon=True,
+    ).start()
+
+
+def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, reply_to=None):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason, reply_to=reply_to)
+        return
+    file_id, ext = extract_animation_file(msg)
+    if not file_id:
+        send_message(chat_id, "Bu xabarda GIF/animatsiya topilmadi.", reply_to=reply_to)
+        return
+    file_path = get_file_path(file_id)
+    if not file_path:
+        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
+        return
+    content = download_file_bytes(file_path)
+    register_request(requester_id)
+    filename = f"gif_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+    zip_bytes = zip_single_file(filename, content)
+    zip_name = f"{filename}.zip"
+    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
+    notify_admin(f"✅ GIF yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
+    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF")
 
 
 def requester_label(from_user):
@@ -1049,7 +1089,7 @@ def build_help_text(user_id):
     weekly_cap = cfg["weekly_cap"]
     return (
         "📋 <b>Bot haqida</b>\n\n"
-        "Menga sticker/custom emoji forward qiling yoki \"📦 Pack yuklab olish\" "
+        "Menga sticker/custom emoji/GIF forward qiling yoki \"📦 Pack yuklab olish\" "
         "tugmasini bosib pack nomini yuboring — men barcha fayllarni ZIP qilib beraman.\n\n"
         "⚙️ <b>Limit qoidalari:</b>\n"
         f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
@@ -1763,7 +1803,7 @@ def webhook():
             except ValueError:
                 pass
         greeting = (
-            "Salom! Menga sticker/custom emoji forward qiling yoki pastdagi "
+            "Salom! Menga sticker/custom emoji yoki GIF forward qiling, yoki pastdagi "
             "\"📦 Pack yuklab olish\" tugmasi orqali pack nomini yuboring."
         )
         if user_id == SUPERADMIN_ID:
@@ -1788,6 +1828,14 @@ def webhook():
         send_message(chat_id, "Nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
         return {"ok": True}
 
+    # ---- GIF (animation) yuborildi: to'g'ridan-to'g'ri yuklab beramiz ----
+    animation_file_id, _ = extract_animation_file(msg)
+    if animation_file_id:
+        if not enforce_force_join(chat_id, user_id):
+            return {"ok": True}
+        handle_animation_request(chat_id, msg, requester_info, user_id)
+        return {"ok": True}
+
     pack_name = extract_pack_name_from_message(msg)
     if pack_name:
         if not enforce_force_join(chat_id, user_id):
@@ -1795,7 +1843,7 @@ def webhook():
         handle_pack_request(chat_id, pack_name, requester_info, user_id)
         return {"ok": True}
 
-    send_message(chat_id, "Sticker/emoji forward qiling yoki pastdagi menyudan foydalaning 👇",
+    send_message(chat_id, "Sticker/emoji/GIF forward qiling yoki pastdagi menyudan foydalaning 👇",
                  reply_markup=main_menu_keyboard(user_id))
     return {"ok": True}
 
