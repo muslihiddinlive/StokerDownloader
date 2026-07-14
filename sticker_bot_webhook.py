@@ -653,8 +653,21 @@ def register_known_user(user_id, from_user=None):
 
 
 def user_label(uid):
-    """Foydalanuvchi uchun o'qiladigan yorliq: @username, bo'lmasa ism, bo'lmasa id."""
+    """Foydalanuvchi uchun o'qiladigan yorliq: @username, bo'lmasa ism, bo'lmasa id.
+    Eski yozuvlarda ism/username saqlanmagan bo'lsa, Telegram'dan jonli so'rab keshlaydi."""
     rec = get_user_record(uid)
+    if not rec.get("username") and not rec.get("first_name"):
+        data = tg_call("getChat", chat_id=uid)
+        if data.get("ok"):
+            info = data["result"]
+            with _state_lock:
+                r = get_user_record(uid)
+                if info.get("username"):
+                    r["username"] = info["username"]
+                if info.get("first_name"):
+                    r["first_name"] = info["first_name"]
+                save_state_locked()
+            rec = r
     if rec.get("username"):
         return f"@{rec['username']}"
     if rec.get("first_name"):
