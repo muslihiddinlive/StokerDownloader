@@ -133,7 +133,7 @@ def tg_call(method, **params):
     return data
 
 
-def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_markup=None):
+def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_markup=None, business_connection_id=None):
     params = {"chat_id": chat_id, "text": text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
@@ -141,6 +141,8 @@ def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_mark
         params["parse_mode"] = "HTML"
     if reply_markup:
         params["reply_markup"] = reply_markup
+    if business_connection_id:
+        params["business_connection_id"] = business_connection_id
     return tg_call("sendMessage", **params)
 
 
@@ -167,11 +169,13 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
     return tg_call("answerCallbackQuery", **params)
 
 
-def send_document_bytes(chat_id, filename, file_bytes, caption=None):
+def send_document_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None):
     files = {"document": (filename, file_bytes)}
     payload = {"chat_id": chat_id}
     if caption:
         payload["caption"] = caption
+    if business_connection_id:
+        payload["business_connection_id"] = business_connection_id
     resp = requests.post(f"{API_BASE}/sendDocument", data=payload, files=files, timeout=60)
     try:
         data = resp.json()
@@ -183,10 +187,12 @@ def send_document_bytes(chat_id, filename, file_bytes, caption=None):
     return data
 
 
-def send_document_by_file_id(chat_id, file_id, caption=None):
+def send_document_by_file_id(chat_id, file_id, caption=None, business_connection_id=None):
     params = {"chat_id": chat_id, "document": file_id}
     if caption:
         params["caption"] = caption
+    if business_connection_id:
+        params["business_connection_id"] = business_connection_id
     return tg_call("sendDocument", **params)
 
 
@@ -875,38 +881,41 @@ def resolve_pack_name_from_text(raw):
     return raw.strip("/ ") or None
 
 
-def handle_tgs_by_index(chat_id, requester_info, requester_id, pack_name, index, reply_to=None):
+def handle_tgs_by_index(chat_id, requester_info, requester_id, pack_name, index, reply_to=None, business_connection_id=None):
     threading.Thread(
         target=_handle_tgs_by_index_sync,
-        args=(chat_id, requester_info, requester_id, pack_name, index, reply_to),
+        args=(chat_id, requester_info, requester_id, pack_name, index, reply_to, business_connection_id),
         daemon=True,
     ).start()
 
 
-def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, index, reply_to=None):
+def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, index, reply_to=None, business_connection_id=None):
     allowed, reason = can_make_request(requester_id)
     if not allowed:
-        send_message(chat_id, reason, reply_to=reply_to)
+        send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
         return
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
-        send_message(chat_id, "Pack topilmadi. Nomini/havolani tekshiring.", reply_to=reply_to)
+        send_message(chat_id, "Pack topilmadi. Nomini/havolani tekshiring.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
         return
     stickers = sticker_set.get("stickers", [])
     if index < 1 or index > len(stickers):
         send_message(chat_id, f"Bu pack'da {len(stickers)} ta element bor. 1 dan {len(stickers)} gacha raqam kiriting.",
-                     reply_to=reply_to)
+                     reply_to=reply_to, business_connection_id=business_connection_id)
         return
     sticker = stickers[index - 1]
     file_path = get_file_path(sticker["file_id"])
     if not file_path:
-        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
+        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
         return
     content = download_file_bytes(file_path)
     ext = file_ext_for(sticker)
     filename = f"{pack_name}_{index}{ext}"
     register_request(requester_id, kind="emoji", detail=filename)
-    send_document_bytes(chat_id, filename, content, caption=f"{pack_name} — #{index}")
+    send_document_bytes(chat_id, filename, content, caption=f"{pack_name} — #{index}",
+                        business_connection_id=business_connection_id)
     notify_admin(f"✅ .tgs orqali yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}")
@@ -958,25 +967,27 @@ def process_pack(pack_name):
     return buf, count
 
 
-def handle_pack_request(chat_id, pack_name, requester_info, requester_id, reply_to=None):
+def handle_pack_request(chat_id, pack_name, requester_info, requester_id, reply_to=None, business_connection_id=None):
     threading.Thread(
         target=_handle_pack_request_sync,
-        args=(chat_id, pack_name, requester_info, requester_id, reply_to),
+        args=(chat_id, pack_name, requester_info, requester_id, reply_to, business_connection_id),
         daemon=True,
     ).start()
 
 
-def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, reply_to=None):
+def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, reply_to=None, business_connection_id=None):
     allowed, reason = can_make_request(requester_id)
     if not allowed:
-        send_message(chat_id, reason, reply_to=reply_to)
+        send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
         return
 
-    send_message(chat_id, f"'{pack_name}' qidirilmoqda, kuting...", reply_to=reply_to)
+    send_message(chat_id, f"'{pack_name}' qidirilmoqda, kuting...", reply_to=reply_to,
+                 business_connection_id=business_connection_id)
 
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
-        send_message(chat_id, "Pack topilmadi. Nomini tekshiring.", reply_to=reply_to)
+        send_message(chat_id, "Pack topilmadi. Nomini tekshiring.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
         notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: topilmadi")
         return
 
@@ -987,7 +998,8 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
         cached = cache.get(pack_name.lower())
         if cached and cached.get("content_hash") == current_hash:
             result = send_document_by_file_id(
-                chat_id, cached["file_id"], caption=f"{cached['sticker_count']} ta fayl topildi. (kesh)"
+                chat_id, cached["file_id"], caption=f"{cached['sticker_count']} ta fayl topildi. (kesh)",
+                business_connection_id=business_connection_id,
             )
             if result.get("ok"):
                 register_request(requester_id, kind="pack", detail=pack_name)
@@ -1005,13 +1017,14 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
 
     buf, result = process_pack(pack_name)
     if buf is None:
-        send_message(chat_id, result, reply_to=reply_to)
+        send_message(chat_id, result, reply_to=reply_to, business_connection_id=business_connection_id)
         notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: {result}")
         return
 
     register_request(requester_id, kind="pack", detail=pack_name)
     zip_bytes = buf.getvalue()
-    send_result = send_document_bytes(chat_id, f"{pack_name}.zip", zip_bytes, caption=f"{result} ta fayl topildi.")
+    send_result = send_document_bytes(chat_id, f"{pack_name}.zip", zip_bytes, caption=f"{result} ta fayl topildi.",
+                                       business_connection_id=business_connection_id)
 
     if CACHE_GROUP_ID:
         cache_result = send_document_bytes(CACHE_GROUP_ID, f"{pack_name}.zip", zip_bytes)
@@ -1101,33 +1114,36 @@ def zip_single_file(filename, content):
     return buf.getvalue()
 
 
-def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None):
+def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None, business_connection_id=None):
     threading.Thread(
         target=_handle_single_sticker_request_sync,
-        args=(chat_id, reply, requester_info, requester_id, reply_to),
+        args=(chat_id, reply, requester_info, requester_id, reply_to, business_connection_id),
         daemon=True,
     ).start()
 
 
-def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requester_id, reply_to=None):
+def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requester_id, reply_to=None, business_connection_id=None):
     allowed, reason = can_make_request(requester_id)
     if not allowed:
-        send_message(chat_id, reason, reply_to=reply_to)
+        send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
         return
     file_id, ext, emoji_char, kind = extract_single_sticker_file(reply)
     if not file_id:
-        send_message(chat_id, "Bu xabarda sticker/custom emoji topilmadi.", reply_to=reply_to)
+        send_message(chat_id, "Bu xabarda sticker/custom emoji topilmadi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
         return
     file_path = get_file_path(file_id)
     if not file_path:
-        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
+        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
         return
     content = download_file_bytes(file_path)
     filename = f"sticker_{emoji_char}{ext}".replace("/", "_")
     register_request(requester_id, kind=kind, detail=filename)
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
-    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
+    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.",
+                        business_connection_id=business_connection_id)
     notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker")
@@ -1165,33 +1181,36 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
         send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
 
 
-def handle_animation_request(chat_id, msg, requester_info, requester_id, reply_to=None):
+def handle_animation_request(chat_id, msg, requester_info, requester_id, reply_to=None, business_connection_id=None):
     threading.Thread(
         target=_handle_animation_request_sync,
-        args=(chat_id, msg, requester_info, requester_id, reply_to),
+        args=(chat_id, msg, requester_info, requester_id, reply_to, business_connection_id),
         daemon=True,
     ).start()
 
 
-def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, reply_to=None):
+def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, reply_to=None, business_connection_id=None):
     allowed, reason = can_make_request(requester_id)
     if not allowed:
-        send_message(chat_id, reason, reply_to=reply_to)
+        send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
         return
     file_id, ext = extract_animation_file(msg)
     if not file_id:
-        send_message(chat_id, "Bu xabarda GIF/animatsiya topilmadi.", reply_to=reply_to)
+        send_message(chat_id, "Bu xabarda GIF/animatsiya topilmadi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
         return
     file_path = get_file_path(file_id)
     if not file_path:
-        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to)
+        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
         return
     content = download_file_bytes(file_path)
     filename = f"gif_{int(datetime.now(timezone.utc).timestamp())}{ext}"
     register_request(requester_id, kind="gif", detail=filename)
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
-    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
+    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.",
+                        business_connection_id=business_connection_id)
     notify_admin(f"✅ GIF yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF")
@@ -2120,6 +2139,45 @@ def handle_pending_input(chat_id, user_id, text):
     return False
 
 
+# ---------- Telegram Business xabarlari ----------
+# Bu funksiya, superadmin/admin o'z shaxsiy profilini (Telegram Business orqali)
+# botga ulab qo'yganda, o'sha profilga yozgan boshqa odamlarning xabarlarini
+# qayta ishlaydi. Javoblar business_connection_id bilan yuboriladi, aks holda
+# xabar noto'g'ri joyga (botning o'z chatiga) ketib qoladi.
+# Eslatma: bu yerda majburiy-a'zolik (force-join) tekshiruvi ishlatilmaydi —
+# faqat haftalik/kunlik so'rov limiti amal qiladi.
+
+def handle_business_message(msg, business_connection_id):
+    chat_id = msg["chat"]["id"]
+    from_user = msg.get("from", {})
+    user_id = from_user.get("id")
+    requester_info = requester_label(from_user)
+
+    register_known_user(user_id, from_user)
+
+    file_id, ext, emoji_char, sticker_kind = extract_single_sticker_file(msg)
+    if file_id:
+        handle_single_sticker_request(chat_id, msg, requester_info, user_id,
+                                       business_connection_id=business_connection_id)
+        return
+
+    animation_file_id, _ = extract_animation_file(msg)
+    if animation_file_id:
+        handle_animation_request(chat_id, msg, requester_info, user_id,
+                                  business_connection_id=business_connection_id)
+        return
+
+    pack_name = extract_pack_name_from_message(msg)
+    if pack_name:
+        handle_pack_request(chat_id, pack_name, requester_info, user_id,
+                             business_connection_id=business_connection_id)
+        return
+
+    send_message(chat_id, "Menga sticker/custom emoji yoki GIF forward qiling, "
+                          "yoki pack havolasini yuboring.",
+                 business_connection_id=business_connection_id)
+
+
 # ---------- Guruh ".zip" / ".zipstiker" (moderatsion, admin-only) ----------
 
 def handle_group_dot_commands(msg, chat_id, user_id, text):
@@ -2227,6 +2285,16 @@ def webhook():
                 register_group(chat)
             elif new_status in ("left", "kicked"):
                 forget_group(chat["id"])
+        return {"ok": True}
+
+    # ---- Telegram Business ulanishi (faqat qabul qilish, alohida sozlash shart emas) ----
+    business_connection = update.get("business_connection")
+    if business_connection:
+        return {"ok": True}
+
+    business_message = update.get("business_message")
+    if business_message:
+        handle_business_message(business_message, business_message.get("business_connection_id"))
         return {"ok": True}
 
     channel_post = update.get("channel_post")
