@@ -2152,8 +2152,33 @@ def handle_business_message(msg, business_connection_id):
     from_user = msg.get("from", {})
     user_id = from_user.get("id")
     requester_info = requester_label(from_user)
+    text = msg.get("text", "") or ""
+    stripped = text.strip()
 
     register_known_user(user_id, from_user)
+
+    if stripped.startswith(".tgs "):
+        if not is_admin(user_id):
+            return
+        parts = stripped.split()
+        if len(parts) < 3:
+            send_message(chat_id, "Format: .tgs <pack_manzili_yoki_nomi> <tartib_raqami>",
+                         business_connection_id=business_connection_id)
+            return
+        pack_name = resolve_pack_name_from_text(parts[1])
+        try:
+            index = int(parts[2])
+        except ValueError:
+            send_message(chat_id, "Tartib raqami butun son bo'lishi kerak.",
+                         business_connection_id=business_connection_id)
+            return
+        if not pack_name:
+            send_message(chat_id, "Pack manzilini/nomini aniqlab bo'lmadi.",
+                         business_connection_id=business_connection_id)
+            return
+        handle_tgs_by_index(chat_id, requester_info, user_id, pack_name, index,
+                            business_connection_id=business_connection_id)
+        return
 
     file_id, ext, emoji_char, sticker_kind = extract_single_sticker_file(msg)
     if file_id:
