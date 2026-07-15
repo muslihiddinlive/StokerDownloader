@@ -188,6 +188,26 @@ def send_document_bytes(chat_id, filename, file_bytes, caption=None, business_co
     return data
 
 
+def send_video_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None):
+    """.webm formatdagi custom emoji/stikerlarni video sifatida (fayl emas) yuboradi,
+    shunda Telegram uni ichkarida ijro etadi."""
+    files = {"video": (filename, file_bytes)}
+    payload = {"chat_id": chat_id}
+    if caption:
+        payload["caption"] = caption
+    if business_connection_id:
+        payload["business_connection_id"] = business_connection_id
+    resp = requests.post(f"{API_BASE}/sendVideo", data=payload, files=files, timeout=60)
+    try:
+        data = resp.json()
+    except ValueError:
+        log.error("sendVideo javobi JSON emas: %s", resp.text[:300])
+        return None
+    if not data.get("ok"):
+        log.error("sendVideo xato: %s", data)
+    return data
+
+
 def send_document_by_file_id(chat_id, file_id, caption=None, business_connection_id=None):
     params = {"chat_id": chat_id, "document": file_id}
     if caption:
@@ -971,13 +991,14 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
     ext = file_ext_for(sticker)
     filename = f"{pack_name}_{index}{ext}"
     register_request(requester_id, kind="emoji", detail=filename)
-    send_document_bytes(chat_id, filename, content, caption=f"{pack_name} — #{index}",
-                        business_connection_id=business_connection_id)
+    caption = f"{pack_name} — #{index}"
+    sender = send_video_bytes if ext == ".webm" else send_document_bytes
+    sender(chat_id, filename, content, caption=caption, business_connection_id=business_connection_id)
     notify_admin(f"✅ .tgs orqali yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}")
+        sender(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}")
     if CACHE_GROUP_ID:
-        send_document_bytes(CACHE_GROUP_ID, filename, content, caption=f"{requester_info} — {filename}")
+        sender(CACHE_GROUP_ID, filename, content, caption=f"{requester_info} — {filename}")
 
 
 def get_custom_emoji_set_name(custom_emoji_id):
