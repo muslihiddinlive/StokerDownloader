@@ -2459,7 +2459,8 @@ def set_webhook():
     result = tg_call(
         "setWebhook", url=url,
         allowed_updates=["message", "callback_query", "channel_post", "my_chat_member",
-                         "pre_checkout_query"],
+                         "pre_checkout_query", "business_connection", "business_message",
+                         "edited_business_message", "deleted_business_messages"],
     )
     log.info("Webhook o'rnatildi: %s -> %s", url, result)
 
