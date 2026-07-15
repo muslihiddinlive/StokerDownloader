@@ -49,6 +49,7 @@ MUHIM: Render Start Command'da bitta worker ishlatilishi kerak:
 import os
 import io
 import json
+import uuid
 import zipfile
 import hashlib
 import logging
@@ -242,11 +243,14 @@ def default_state():
             "reaction_emoji": DEFAULT_REACTION_EMOJI,
             "superadmin_reaction_emoji": DEFAULT_REACTION_EMOJI,
             "channel_reaction_emoji": DEFAULT_REACTION_EMOJI,
+            "keyword_free_limit": 2,
         },
         "force_channels": [],
         "bonus_channels": [],
         "pack_cache": {},  # {pack_name_lower: {"file_id","sticker_count","content_hash","cached_at"}}
         "stats": {"total_requests": 0},
+        "business_connections": {},  # {connection_id: {"owner_id": int, "enabled": bool}}
+        "keywords": {},  # {str(owner_id): [{"id","trigger","type"("exact"/"any"),"response"}]}
     }
 
 
@@ -648,6 +652,59 @@ def is_premium(user_id):
     if not until:
         return False
     return datetime.now(timezone.utc).timestamp() < until
+
+
+# ---------- Kalit so'z (avto-javob) tizimi ----------
+
+def get_keyword_limit(user_id):
+    """None = cheksiz."""
+    if is_admin(user_id):
+        return None
+    if is_premium(user_id):
+        return None
+    return get_limit_config().get("keyword_free_limit", 2)
+
+
+def get_user_keywords(user_id):
+    with _state_lock:
+        return list(STATE.setdefault("keywords", {}).get(str(user_id), []))
+
+
+def add_keyword(user_id, trigger, ktype, response):
+    with _state_lock:
+        kws = STATE.setdefault("keywords", {}).setdefault(str(user_id), [])
+        limit = get_keyword_limit(user_id)
+        if limit is not None and len(kws) >= limit:
+            return False, f"Limitingiz {limit} ta. Premium (100 Stars) olsangiz cheksiz bo'ladi."
+        kw_id = uuid.uuid4().hex[:8]
+        kws.append({"id": kw_id, "trigger": trigger, "type": ktype, "response": response})
+        save_state_locked()
+        return True, kw_id
+
+
+def delete_keyword(user_id, kw_id):
+    with _state_lock:
+        kws = STATE.setdefault("keywords", {}).get(str(user_id), [])
+        before = len(kws)
+        kws[:] = [k for k in kws if k["id"] != kw_id]
+        save_state_locked()
+        return len(kws) < before
+
+
+def find_keyword_response(owner_id, text):
+    kws = get_user_keywords(owner_id)
+    text_l = (text or "").lower().strip()
+    if not text_l:
+        return None
+    fallback = None
+    for kw in kws:
+        if kw.get("type") == "any":
+            fallback = kw.get("response")
+            continue
+        trig = (kw.get("trigger") or "").lower().strip()
+        if trig and trig in text_l:
+            return kw.get("response")
+    return fallback
 
 
 def grant_premium(user_id, days=182):
@@ -1241,6 +1298,7 @@ def main_menu_keyboard(user_id):
         ],
         [{"text": "❓ Yordam", "callback_data": "menu_help"}],
         [{"text": "🏆 Reyting", "callback_data": "menu_leaderboard"}],
+        [{"text": "🔑 Avto-javob (Business)", "callback_data": "menu_keywords"}],
     ]
     if is_admin(user_id):
         rows.append([{"text": "👑 Superadmin panel" if user_id == SUPERADMIN_ID else "🛠 Admin panel",
@@ -1439,6 +1497,88 @@ def handle_callback_query(cq):
             payload=f"premium_182:{user_id}", provider_token="", currency="XTR",
             prices=[{"label": "Premium 6 oy", "amount": 100}],
         )
+        return
+
+    if data == "menu_keywords":
+        answer_callback_query(cq_id)
+        kws = get_user_keywords(user_id)
+        limit = get_keyword_limit(user_id)
+        limit_text = "cheksiz" if limit is None else f"{len(kws)}/{limit}"
+        text = (
+            "🔑 <b>Avto-javob (Telegram Business)</b>\n\n"
+            "Bu kalitlar faqat profilingizga Business orqali ulangan botga "
+            "boshqalar yozganda ishlaydi.\n\n"
+            f"Joriy: {limit_text}\n\n"
+            "Masalan: kimdir \"salom\" desa, bot avtomatik javob yozadi."
+        )
+        rows = []
+        for kw in kws:
+            label = "🌐 Har qanday xabar" if kw["type"] == "any" else f"🎯 «{kw['trigger']}»"
+            rows.append([
+                {"text": label, "callback_data": f"kw_view:{kw['id']}"},
+                {"text": "🗑", "callback_data": f"kw_delete:{kw['id']}"},
+            ])
+        if limit is None or len(kws) < limit:
+            rows.append([{"text": "➕ Yangi kalit qo'shish", "callback_data": "kw_add_start"}])
+        else:
+            rows.append([{"text": "⭐ Premium olish (cheksiz)", "callback_data": "menu_premium"}])
+        rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "kw_add_start":
+        answer_callback_query(cq_id)
+        limit = get_keyword_limit(user_id)
+        kws = get_user_keywords(user_id)
+        if limit is not None and len(kws) >= limit:
+            safe_edit_or_send(chat_id, message_id, "Limitingiz tugagan.",
+                               reply_markup={"inline_keyboard": [[{"text": "⬅️ Orqaga", "callback_data": "menu_keywords"}]]})
+            return
+        rows = [
+            [{"text": "🎯 Aniq so'z/ibora bo'yicha", "callback_data": "kw_type:exact"}],
+            [{"text": "🌐 Har qanday xabarga (default javob)", "callback_data": "kw_type:any"}],
+            [{"text": "⬅️ Orqaga", "callback_data": "menu_keywords"}],
+        ]
+        safe_edit_or_send(chat_id, message_id, "Kalit turini tanlang:", reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("kw_type:"):
+        answer_callback_query(cq_id)
+        ktype = data.split(":", 1)[1]
+        if ktype == "any":
+            set_pending_input(user_id, "kw_response", {"trigger": "*", "type": "any"})
+            safe_edit_or_send(chat_id, message_id,
+                               "Endi boshqalar yozganda avtomatik yuboriladigan javob matnini yozing:",
+                               reply_markup=back_to_menu_keyboard())
+        else:
+            set_pending_input(user_id, "kw_trigger")
+            safe_edit_or_send(chat_id, message_id,
+                               "Qaysi so'z/ibora kelsa ishga tushsin? (masalan: salom)",
+                               reply_markup=back_to_menu_keyboard())
+        return
+
+    if data.startswith("kw_delete:"):
+        answer_callback_query(cq_id)
+        kw_id = data.split(":", 1)[1]
+        delete_keyword(user_id, kw_id)
+        safe_edit_or_send(chat_id, message_id, "🗑 O'chirildi.",
+                           reply_markup={"inline_keyboard": [[{"text": "⬅️ Kalitlarim", "callback_data": "menu_keywords"}]]})
+        return
+
+    if data.startswith("kw_view:"):
+        answer_callback_query(cq_id)
+        kw_id = data.split(":", 1)[1]
+        kws = get_user_keywords(user_id)
+        kw = next((k for k in kws if k["id"] == kw_id), None)
+        if not kw:
+            safe_edit_or_send(chat_id, message_id, "Topilmadi.",
+                               reply_markup={"inline_keyboard": [[{"text": "⬅️ Kalitlarim", "callback_data": "menu_keywords"}]]})
+            return
+        trig = "Har qanday xabar" if kw["type"] == "any" else kw["trigger"]
+        text = f"🎯 Kalit: {trig}\n💬 Javob: {kw['response']}"
+        rows = [[{"text": "🗑 O'chirish", "callback_data": f"kw_delete:{kw['id']}"}],
+                [{"text": "⬅️ Kalitlarim", "callback_data": "menu_keywords"}]]
+        safe_edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
         return
 
     if data == "menu_leaderboard":
@@ -1791,6 +1931,7 @@ def handle_callback_query(cq):
             f"⚙️ <b>Limit sozlamalari</b>\n\n"
             f"Bazaviy haftalik: {cfg['base_weekly']}\n"
             f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
+            f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n"
         )
         keyboard = {"inline_keyboard": [
             [
@@ -1800,6 +1941,45 @@ def handle_callback_query(cq):
             [
                 {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
                 {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
+            ],
+            [
+                {"text": "Kalit −1", "callback_data": "limit_kw_dec"},
+                {"text": "Kalit +1", "callback_data": "limit_kw_inc"},
+            ],
+            [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data in ("limit_kw_dec", "limit_kw_inc"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        cfg = get_limit_config()
+        current = cfg.get("keyword_free_limit", 2)
+        new_val = max(0, current - 1) if data == "limit_kw_dec" else current + 1
+        with _state_lock:
+            STATE.setdefault("config", {})["keyword_free_limit"] = new_val
+            save_state_locked()
+        cfg = get_limit_config()
+        text = (
+            f"⚙️ <b>Limit sozlamalari</b>\n\n"
+            f"Bazaviy haftalik: {cfg['base_weekly']}\n"
+            f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
+            f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n"
+        )
+        keyboard = {"inline_keyboard": [
+            [
+                {"text": "Bazaviy −1", "callback_data": "limit_base_dec"},
+                {"text": "Bazaviy +1", "callback_data": "limit_base_inc"},
+            ],
+            [
+                {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
+                {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
+            ],
+            [
+                {"text": "Kalit −1", "callback_data": "limit_kw_dec"},
+                {"text": "Kalit +1", "callback_data": "limit_kw_inc"},
             ],
             [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
         ]}
@@ -1824,6 +2004,7 @@ def handle_callback_query(cq):
             f"⚙️ <b>Limit sozlamalari</b>\n\n"
             f"Bazaviy haftalik: {cfg['base_weekly']}\n"
             f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
+            f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n"
         )
         keyboard = {"inline_keyboard": [
             [
@@ -1833,6 +2014,10 @@ def handle_callback_query(cq):
             [
                 {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
                 {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
+            ],
+            [
+                {"text": "Kalit −1", "callback_data": "limit_kw_dec"},
+                {"text": "Kalit +1", "callback_data": "limit_kw_inc"},
             ],
             [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
         ]}
@@ -2024,6 +2209,30 @@ def handle_pending_input(chat_id, user_id, text):
         handle_pack_request(chat_id, pack_name, requester_label({"id": user_id}), user_id)
         return True
 
+    if action == "kw_trigger":
+        clear_pending_input(user_id)
+        trigger = text.strip()
+        if not trigger:
+            send_message(chat_id, "Bo'sh bo'lishi mumkin emas. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+            return True
+        set_pending_input(user_id, "kw_response", {"trigger": trigger, "type": "exact"})
+        send_message(chat_id, f"«{trigger}» kelganda qanday javob yozilsin?", reply_markup=back_to_menu_keyboard())
+        return True
+
+    if action == "kw_response":
+        clear_pending_input(user_id)
+        response = text.strip()
+        if not response:
+            send_message(chat_id, "Bo'sh bo'lishi mumkin emas. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+            return True
+        data = pending.get("data") or {}
+        ok, result = add_keyword(user_id, data.get("trigger", "*"), data.get("type", "exact"), response)
+        if ok:
+            send_message(chat_id, "✅ Kalit qo'shildi.", reply_markup=back_to_menu_keyboard())
+        else:
+            send_message(chat_id, f"❌ {result}", reply_markup=back_to_menu_keyboard())
+        return True
+
     # Quyidagilar faqat adminlar uchun ishlaydi:
     if not is_admin(user_id):
         clear_pending_input(user_id)
@@ -2147,6 +2356,12 @@ def handle_pending_input(chat_id, user_id, text):
 # Eslatma: bu yerda majburiy-a'zolik (force-join) tekshiruvi ishlatilmaydi —
 # faqat haftalik/kunlik so'rov limiti amal qiladi.
 
+def get_business_owner(connection_id):
+    with _state_lock:
+        conn = STATE.get("business_connections", {}).get(connection_id)
+        return conn.get("owner_id") if conn else None
+
+
 def handle_business_message(msg, business_connection_id):
     chat_id = msg["chat"]["id"]
     from_user = msg.get("from", {})
@@ -2154,11 +2369,17 @@ def handle_business_message(msg, business_connection_id):
     requester_info = requester_label(from_user)
     text = msg.get("text", "") or ""
     stripped = text.strip()
+    reply = msg.get("reply_to_message")
 
     register_known_user(user_id, from_user)
 
+    owner_id = get_business_owner(business_connection_id)
+    is_owner = owner_id is not None and user_id == owner_id
+    can_run_commands = is_owner or is_admin(user_id)
+
+    # ---- .tgs <pack> <raqam> — faqat profil egasi (yoki bot admini) uchun ----
     if stripped.startswith(".tgs "):
-        if not is_admin(user_id):
+        if not can_run_commands:
             return
         parts = stripped.split()
         if len(parts) < 3:
@@ -2180,27 +2401,37 @@ def handle_business_message(msg, business_connection_id):
                             business_connection_id=business_connection_id)
         return
 
-    file_id, ext, emoji_char, sticker_kind = extract_single_sticker_file(msg)
-    if file_id:
-        handle_single_sticker_request(chat_id, msg, requester_info, user_id,
+    # ---- .zip / .zipstiker / .zipgif — reply qilingan faylni kod (ZIP) qilib beradi ----
+    if stripped in (".zip", ".zipstiker") and can_run_commands:
+        if not reply:
+            send_message(chat_id, "Sticker/custom emoji xabariga reply qilib yozing.",
+                         business_connection_id=business_connection_id)
+            return
+        if stripped == ".zip":
+            pack_name = extract_pack_name_from_message(reply)
+            if pack_name:
+                handle_pack_request(chat_id, pack_name, requester_info, user_id,
+                                     business_connection_id=business_connection_id)
+                return
+        handle_single_sticker_request(chat_id, reply, requester_info, user_id,
                                        business_connection_id=business_connection_id)
         return
 
-    animation_file_id, _ = extract_animation_file(msg)
-    if animation_file_id:
-        handle_animation_request(chat_id, msg, requester_info, user_id,
+    if stripped == ".zipgif" and can_run_commands:
+        if not reply:
+            send_message(chat_id, "GIF xabariga reply qilib .zipgif yozing.",
+                         business_connection_id=business_connection_id)
+            return
+        handle_animation_request(chat_id, reply, requester_info, user_id,
                                   business_connection_id=business_connection_id)
         return
 
-    pack_name = extract_pack_name_from_message(msg)
-    if pack_name:
-        handle_pack_request(chat_id, pack_name, requester_info, user_id,
-                             business_connection_id=business_connection_id)
-        return
-
-    send_message(chat_id, "Menga sticker/custom emoji yoki GIF forward qiling, "
-                          "yoki pack havolasini yuboring.",
-                 business_connection_id=business_connection_id)
+    # ---- Boshqa hamma narsa: faqat kalit so'z (avto-javob) tizimi ishlaydi ----
+    # Stiker/GIF/pack-havola avtomatik qayta ishlanmaydi — buyruq berilmagunicha bot jim turadi.
+    if owner_id and not is_owner:
+        reply_text = find_keyword_response(owner_id, text)
+        if reply_text:
+            send_message(chat_id, reply_text, business_connection_id=business_connection_id)
 
 
 # ---------- Guruh ".zip" / ".zipstiker" (moderatsion, admin-only) ----------
@@ -2312,9 +2543,17 @@ def webhook():
                 forget_group(chat["id"])
         return {"ok": True}
 
-    # ---- Telegram Business ulanishi (faqat qabul qilish, alohida sozlash shart emas) ----
+    # ---- Telegram Business ulanishi: egasini eslab qolamiz (kalit so'zlar shu userga tegishli bo'ladi) ----
     business_connection = update.get("business_connection")
     if business_connection:
+        conn_id = business_connection.get("id")
+        owner = business_connection.get("user", {})
+        with _state_lock:
+            STATE.setdefault("business_connections", {})[conn_id] = {
+                "owner_id": owner.get("id"),
+                "enabled": business_connection.get("is_enabled", True),
+            }
+            save_state_locked()
         return {"ok": True}
 
     business_message = update.get("business_message")
@@ -2365,6 +2604,11 @@ def webhook():
         if text.strip().startswith("."):
             if handle_group_dot_commands(msg, chat_id, user_id, text):
                 return {"ok": True}
+        reply = msg.get("reply_to_message")
+        if reply and reply.get("from", {}).get("id") and is_admin(reply["from"]["id"]) and not is_admin(user_id):
+            reply_text = find_keyword_response(reply["from"]["id"], text)
+            if reply_text:
+                send_message(chat_id, reply_text, reply_to=msg["message_id"])
         return {"ok": True}
 
     # ================= Shaxsiy chat (private) =================
