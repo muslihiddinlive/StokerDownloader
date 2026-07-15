@@ -208,6 +208,27 @@ def send_video_bytes(chat_id, filename, file_bytes, caption=None, business_conne
     return data
 
 
+def send_animation_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None):
+    """.webm formatdagi custom emoji/stikerlarni animatsiya sifatida (GIF kabi) yuboradi —
+    bu qisqa, tovushsiz, halqali cliplar uchun sendVideo'dan ko'ra to'g'ri usul,
+    Telegram uni ichkarida halqali ijro etadi, fayl sifatida ko'rsatmaydi."""
+    files = {"animation": (filename, file_bytes)}
+    payload = {"chat_id": chat_id}
+    if caption:
+        payload["caption"] = caption
+    if business_connection_id:
+        payload["business_connection_id"] = business_connection_id
+    resp = requests.post(f"{API_BASE}/sendAnimation", data=payload, files=files, timeout=60)
+    try:
+        data = resp.json()
+    except ValueError:
+        log.error("sendAnimation javobi JSON emas: %s", resp.text[:300])
+        return None
+    if not data.get("ok"):
+        log.error("sendAnimation xato: %s", data)
+    return data
+
+
 def send_document_by_file_id(chat_id, file_id, caption=None, business_connection_id=None):
     params = {"chat_id": chat_id, "document": file_id}
     if caption:
@@ -992,7 +1013,7 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
     filename = f"{pack_name}_{index}{ext}"
     register_request(requester_id, kind="emoji", detail=filename)
     caption = f"{pack_name} — #{index}"
-    sender = send_video_bytes if ext == ".webm" else send_document_bytes
+    sender = send_animation_bytes if ext == ".webm" else send_document_bytes
     sender(chat_id, filename, content, caption=caption, business_connection_id=business_connection_id)
     notify_admin(f"✅ .tgs orqali yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
