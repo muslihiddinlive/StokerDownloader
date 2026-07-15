@@ -1020,14 +1020,9 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
     filename = f"{pack_name}_{index}{ext}"
     register_request(requester_id, kind="emoji", detail=filename)
     caption = f"{pack_name} — #{index}"
-    # Avval asl file_id orqali tabiiy sticker preview yuboramiz (Telegram bu formatni
-    # sendVideo/sendAnimation orqali to'g'ri ijro eta olmaydi — bu maxsus shaffof-fonli
-    # sticker konteyneri, faqat sendSticker orqali to'g'ri ko'rinadi).
-    send_sticker_by_file_id(chat_id, sticker["file_id"], business_connection_id=business_connection_id)
     send_document_bytes(chat_id, filename, content, caption=caption, business_connection_id=business_connection_id)
     notify_admin(f"✅ .tgs orqali yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_sticker_by_file_id(SUPERADMIN_ID, sticker["file_id"])
         send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}")
     if CACHE_GROUP_ID:
         send_document_bytes(CACHE_GROUP_ID, filename, content, caption=f"{requester_info} — {filename}")
