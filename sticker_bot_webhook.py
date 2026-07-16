@@ -49,15 +49,19 @@ MUHIM: Render Start Command'da bitta worker ishlatilishi kerak:
 import os
 import io
 import json
+import html
 import uuid
 import zipfile
 import hashlib
 import logging
+import tempfile
+import subprocess
 import threading
 from datetime import datetime, timezone
 
 from flask import Flask, request
 import requests
+import imageio_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sticker-bot")
@@ -1219,6 +1223,235 @@ def zip_single_file(filename, content):
     return buf.getvalue()
 
 
+# ================= ID olish (single + butun pack) =================
+
+ID_LIST_CHUNK_BUDGET = 3200  # Telegram 4096 belgi chegarasidan xavfsiz kam
+
+
+def build_raw_dump_json(update_id, msg):
+    """Berilgan xabarning Telegramdan qanday kelgani (xom update JSON'i) formatida qaytaradi."""
+    payload = {"update_id": update_id, "message": msg} if update_id is not None else {"message": msg}
+    return json.dumps(payload, ensure_ascii=False, indent=1)
+
+
+def send_id_dump(chat_id, update_id, msg, label, business_connection_id=None):
+    """Bitta sticker/custom emoji/GIF uchun xom Telegram JSON'ini yuboradi.
+    Juda uzun bo'lsa xabar o'rniga .json fayl sifatida yuboradi."""
+    dump = build_raw_dump_json(update_id, msg)
+    text = f"🆔 {label} — xom ID ma'lumoti:\n<pre><code class=\"language-json\">{html.escape(dump, quote=False)}</code></pre>"
+    if len(text) <= ID_LIST_CHUNK_BUDGET:
+        result = send_message(chat_id, text, parse_mode_html=True, business_connection_id=business_connection_id)
+        if result and result.get("ok"):
+            return
+    send_document_bytes(
+        chat_id, f"{label.lower().replace(' ', '_')}_id.json", dump.encode("utf-8"),
+        caption=f"🆔 {label} — xom ID ma'lumoti", business_connection_id=business_connection_id,
+    )
+
+
+def _pack_id_header(sticker_set, pack_name, suffix=""):
+    title = sticker_set.get("title") or pack_name
+    return f"{html.escape(title, quote=False)} — <code>{html.escape(pack_name, quote=False)}</code>{suffix}"
+
+
+def build_pack_id_text_chunks(sticker_set, pack_name, use_tg_emoji):
+    """'N-emoji - ID' qatorlarini tayyorlaydi, Telegram xabar uzunligiga qarab bir nechta
+    xabarga bo'ladi. use_tg_emoji=True bo'lsa custom emoji <tg-emoji> orqali jonli ko'rsatiladi
+    (buning uchun bot egasida Telegram Premium bo'lishi shart — aks holda Telegram xabarni rad etadi,
+    shu holat chaqiruvchi tomonda tekshiriladi va oddiy formatga o'tiladi)."""
+    stickers = sticker_set.get("stickers", [])
+    header = _pack_id_header(sticker_set, pack_name)
+    chunks = []
+    current_lines = [header, ""]
+    current_len = len(header) + 1
+    for i, sticker in enumerate(stickers, start=1):
+        placeholder = html.escape(sticker.get("emoji") or "🔸", quote=False)
+        if use_tg_emoji and sticker.get("custom_emoji_id"):
+            id_value = sticker["custom_emoji_id"]
+            # emoji-id bu yerda HTML atribut ichida — bu yagona joy, tirnoqlarni ham escape qilish kerak
+            emoji_part = f'<tg-emoji emoji-id="{html.escape(id_value, quote=True)}">{placeholder}</tg-emoji>'
+        else:
+            id_value = sticker.get("file_id", "")
+            emoji_part = placeholder
+        line = f"{i}-{emoji_part} - <code>{html.escape(str(id_value), quote=False)}</code>"
+        if current_len + len(line) + 1 > ID_LIST_CHUNK_BUDGET and len(current_lines) > 2:
+            chunks.append("\n".join(current_lines))
+            current_lines = [_pack_id_header(sticker_set, pack_name, " (davomi)"), ""]
+            current_len = len(current_lines[0]) + 1
+        current_lines.append(line)
+        current_len += len(line) + 1
+    if len(current_lines) > 2:
+        chunks.append("\n".join(current_lines))
+    return chunks
+
+
+def build_pack_id_txt_content(sticker_set, pack_name):
+    is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
+    title = sticker_set.get("title") or pack_name
+    lines = [f"{title} - {pack_name}", ""]
+    for i, sticker in enumerate(sticker_set.get("stickers", []), start=1):
+        if is_emoji_pack:
+            id_value = sticker.get("custom_emoji_id") or sticker.get("file_id", "")
+        else:
+            id_value = sticker.get("file_id", "")
+        lines.append(f"{i}-{sticker.get('emoji', '')} - {id_value}")
+    return "\n".join(lines)
+
+
+def send_pack_ids_as_text(chat_id, pack_name, sticker_set, business_connection_id=None):
+    is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
+    chunks = build_pack_id_text_chunks(sticker_set, pack_name, use_tg_emoji=is_emoji_pack)
+    if not chunks:
+        send_message(chat_id, "Bu pack bo'sh ko'rinadi.", business_connection_id=business_connection_id)
+        return
+    if is_emoji_pack:
+        first = send_message(chat_id, chunks[0], parse_mode_html=True, business_connection_id=business_connection_id)
+        if not (first and first.get("ok")):
+            send_message(
+                chat_id,
+                "⚠️ Custom emoji'larni jonli ko'rsatib bo'lmadi — buning uchun bot egasida Telegram "
+                "Premium bo'lishi kerak. ID'larni oddiy (jonli ko'rinishsiz) formatda yuboryapman.",
+                business_connection_id=business_connection_id,
+            )
+            for chunk in build_pack_id_text_chunks(sticker_set, pack_name, use_tg_emoji=False):
+                send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
+            return
+        for chunk in chunks[1:]:
+            send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
+    else:
+        for chunk in chunks:
+            send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
+
+
+def send_pack_ids_as_txt_file(chat_id, pack_name, sticker_set, business_connection_id=None):
+    content = build_pack_id_txt_content(sticker_set, pack_name)
+    send_document_bytes(
+        chat_id, f"{pack_name}_id.txt", content.encode("utf-8"),
+        caption=f"{pack_name} — barcha ID'lar", business_connection_id=business_connection_id,
+    )
+
+
+def convert_to_webm(content_bytes):
+    """MP4/GIF baytlarini ovozsiz VP9 webm'ga o'giradi. Muvaffaqiyatsiz bo'lsa None qaytaradi."""
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    with tempfile.TemporaryDirectory() as tmp:
+        in_path = os.path.join(tmp, "input.mp4")
+        out_path = os.path.join(tmp, "output.webm")
+        with open(in_path, "wb") as f:
+            f.write(content_bytes)
+        cmd = [
+            ffmpeg_path, "-y", "-i", in_path,
+            "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-an",
+            out_path,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            log.error("ffmpeg webm konvertatsiya xatosi: %s", e)
+            return None
+        if not os.path.exists(out_path):
+            return None
+        with open(out_path, "rb") as f:
+            return f.read()
+
+
+def handle_id_single_request(chat_id, pending, requester_id):
+    threading.Thread(
+        target=_handle_id_single_request_sync,
+        args=(chat_id, pending, requester_id),
+        daemon=True,
+    ).start()
+
+
+def _handle_id_single_request_sync(chat_id, pending, requester_id):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason)
+        return
+    kind_label = "Custom emoji" if pending.get("kind") == "emoji" else "Sticker"
+    register_request(requester_id, kind=f"{pending.get('kind', 'sticker')}_id", detail="raw_id")
+    send_id_dump(chat_id, pending.get("update_id"), pending["raw_message"], kind_label)
+    notify_admin(f"✅ {kind_label} ID so'raldi\nKimdan: {pending['requester_info']}")
+
+
+def handle_id_pack_request(chat_id, pack_name, requester_info, requester_id, mode):
+    threading.Thread(
+        target=_handle_id_pack_request_sync,
+        args=(chat_id, pack_name, requester_info, requester_id, mode),
+        daemon=True,
+    ).start()
+
+
+def _handle_id_pack_request_sync(chat_id, pack_name, requester_info, requester_id, mode):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason)
+        return
+    sticker_set = get_sticker_set(pack_name)
+    if not sticker_set:
+        send_message(chat_id, "Pack topilmadi. Nomini tekshiring.")
+        notify_admin(f"⚠️ Muvaffaqiyatsiz ID so'rovi\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: topilmadi")
+        return
+    register_request(requester_id, kind="pack_id", detail=pack_name)
+    if mode == "txt":
+        send_pack_ids_as_txt_file(chat_id, pack_name, sticker_set)
+    else:
+        send_pack_ids_as_text(chat_id, pack_name, sticker_set)
+    notify_admin(
+        f"✅ Pack ID so'raldi ({mode})\nKimdan: {requester_info}\nPack: {pack_name}\n"
+        f"Fayllar soni: {len(sticker_set.get('stickers', []))}"
+    )
+
+
+def handle_gif_webm_request(chat_id, pending, requester_id):
+    threading.Thread(
+        target=_handle_gif_webm_request_sync,
+        args=(chat_id, pending, requester_id),
+        daemon=True,
+    ).start()
+
+
+def _handle_gif_webm_request_sync(chat_id, pending, requester_id):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason)
+        return
+    file_path = get_file_path(pending["file_id"])
+    if not file_path:
+        send_message(chat_id, "Faylni olishda xato yuz berdi.")
+        return
+    content = download_file_bytes(file_path)
+    webm_bytes = convert_to_webm(content)
+    if not webm_bytes:
+        send_message(chat_id, "GIF'ni webm'ga o'girishda xato yuz berdi. Qaytadan urinib ko'ring.")
+        return
+    register_request(requester_id, kind="gif_webm", detail="gif.webm")
+    send_animation_bytes(chat_id, "gif.webm", webm_bytes, caption="🎞 WebM tayyor.")
+    notify_admin(f"✅ GIF webm'ga o'girildi\nKimdan: {pending['requester_info']}")
+    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+        send_animation_bytes(SUPERADMIN_ID, "gif.webm", webm_bytes, caption=f"{pending['requester_info']} — webm GIF")
+    if CACHE_GROUP_ID:
+        send_animation_bytes(CACHE_GROUP_ID, "gif.webm", webm_bytes, caption=f"{pending['requester_info']} — webm GIF")
+
+
+def handle_gif_id_request(chat_id, pending, requester_id):
+    threading.Thread(
+        target=_handle_gif_id_request_sync,
+        args=(chat_id, pending, requester_id),
+        daemon=True,
+    ).start()
+
+
+def _handle_gif_id_request_sync(chat_id, pending, requester_id):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason)
+        return
+    register_request(requester_id, kind="gif_id", detail="gif_id")
+    send_id_dump(chat_id, pending.get("update_id"), pending["raw_message"], "GIF")
+    notify_admin(f"✅ GIF ID so'raldi\nKimdan: {pending['requester_info']}")
+
+
 def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None, business_connection_id=None):
     threading.Thread(
         target=_handle_single_sticker_request_sync,
@@ -1696,6 +1929,62 @@ def handle_callback_query(cq):
             handle_pack_request(chat_id, pending["pack_name"], pending["requester_info"], user_id)
         else:
             handle_single_sticker_request_from_pending(chat_id, pending, user_id)
+        return
+
+    if data.startswith("dl_id_single:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Stikerni qayta forward qiling.")
+            return
+        edit_message_text(chat_id, message_id, "⏳ Tayyorlanmoqda...")
+        handle_id_single_request(chat_id, pending, user_id)
+        return
+
+    if data.startswith("dl_id_pack:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending or not pending.get("pack_name"):
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Stikerni qayta forward qiling.")
+            return
+        token2 = store_pending_choice({
+            "pack_name": pending["pack_name"], "requester_info": pending["requester_info"],
+        })
+        edit_message_text(
+            chat_id, message_id, "ID'larni qanday shaklda olishni xohlaysiz?",
+            reply_markup={"inline_keyboard": [
+                [{"text": "📝 Matn qilib chatga jo'natish", "callback_data": f"idpack_text:{token2}"}],
+                [{"text": "📄 Txt fayl qilib jo'natish", "callback_data": f"idpack_txt:{token2}"}],
+            ]},
+        )
+        return
+
+    if data.startswith("idpack_text:") or data.startswith("idpack_txt:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Stikerni qayta forward qiling.")
+            return
+        edit_message_text(chat_id, message_id, "⏳ Tayyorlanmoqda...")
+        mode = "txt" if data.startswith("idpack_txt:") else "text"
+        handle_id_pack_request(chat_id, pending["pack_name"], pending["requester_info"], user_id, mode)
+        return
+
+    if data.startswith("dl_gif_webm:") or data.startswith("dl_gif_id:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. GIF'ni qaytadan yuboring.")
+            return
+        edit_message_text(chat_id, message_id, "⏳ Tayyorlanmoqda...")
+        if data.startswith("dl_gif_webm:"):
+            handle_gif_webm_request(chat_id, pending, user_id)
+        else:
+            handle_gif_id_request(chat_id, pending, user_id)
         return
 
     # ---- Quyidagilar faqat adminlar uchun ----
@@ -2713,20 +3002,31 @@ def webhook():
         token = store_pending_choice({
             "pack_name": pack_name, "file_id": file_id, "ext": ext,
             "emoji_char": emoji_char, "requester_info": requester_info, "kind": sticker_kind,
+            "raw_message": msg, "update_id": update.get("update_id"),
         })
-        keyboard_rows = []
+        keyboard_rows = [[{"text": "💾 Faqat shu stiker/emojini ZIP qilish", "callback_data": f"dl_single:{token}"}]]
         if pack_name:
             keyboard_rows.append([{"text": "📦 Butun pack'ni ZIP qilib olish", "callback_data": f"dl_pack:{token}"}])
-        keyboard_rows.append([{"text": "💾 Faqat shu stikerni olish", "callback_data": f"dl_single:{token}"}])
+        keyboard_rows.append([{"text": "🆔 Shu stiker/emojining ID'sini berish", "callback_data": f"dl_id_single:{token}"}])
+        if pack_name:
+            keyboard_rows.append([{"text": "🆔 Butun pack ID'larini berish", "callback_data": f"dl_id_pack:{token}"}])
         send_message(chat_id, "Nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
         return {"ok": True}
 
-    # ---- GIF (animation) yuborildi: to'g'ridan-to'g'ri yuklab beramiz ----
+    # ---- GIF (animation) yuborildi: tanlov beramiz (webm yoki ID) ----
     animation_file_id, _ = extract_animation_file(msg)
     if animation_file_id:
         if not enforce_force_join(chat_id, user_id):
             return {"ok": True}
-        handle_animation_request(chat_id, msg, requester_info, user_id)
+        token = store_pending_choice({
+            "file_id": animation_file_id, "requester_info": requester_info,
+            "raw_message": msg, "update_id": update.get("update_id"),
+        })
+        keyboard_rows = [
+            [{"text": "🎞 WebM qilib berish", "callback_data": f"dl_gif_webm:{token}"}],
+            [{"text": "🆔 ID sini berish", "callback_data": f"dl_gif_id:{token}"}],
+        ]
+        send_message(chat_id, "GIF bilan nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
         return {"ok": True}
 
     pack_name = extract_pack_name_from_message(msg)
