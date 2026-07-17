@@ -1274,24 +1274,28 @@ def send_pack_ids_as_txt_file(chat_id, pack_name, sticker_set, business_connecti
     )
 
 
-def build_pack_id_blockquote_chunks(sticker_set, pack_name):
-    """'Matn - to'liq' varianti: Telegram qoidasiga ko'ra blockquote ichida boshqa formatlash
-    (code, tg-emoji) bo'lishi mumkin emas, shu sabab bu yerda ID'lar oddiy matn, lekin butun
-    blok expandable blockquote ichida — bitta tap bilan yig'ish/yoyish va to'liq nusxalash uchun."""
+def build_pack_id_live_chunks(sticker_set, pack_name, use_tg_emoji):
+    """'Matn - to'liq' varianti: 'N-emoji - ID' qatorlari. use_tg_emoji=True bo'lsa custom
+    emoji <tg-emoji> orqali jonli ko'rsatiladi (buning uchun bot egasida Telegram Premium
+    bo'lishi shart — aks holda Telegram xabarni rad etadi, bu holat chaqiruvchi tomonda
+    tekshiriladi va oddiy formatga o'tiladi), ID esa <code> bilan bir-bosib-nusxalanadi.
+    Xabar uzunligiga qarab bir nechta xabarga bo'linadi."""
     stickers = sticker_set.get("stickers", [])
     title = sticker_set.get("title") or pack_name
-    is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
-    header = f"{html.escape(title, quote=False)} - {html.escape(pack_name, quote=False)}"
+    header = f"{html.escape(title, quote=False)} — <code>{html.escape(pack_name, quote=False)}</code>"
     chunks = []
     current_lines = [header, ""]
     current_len = len(header) + 1
     for i, sticker in enumerate(stickers, start=1):
         placeholder = html.escape(sticker.get("emoji") or "🔸", quote=False)
-        if is_emoji_pack:
-            id_value = sticker.get("custom_emoji_id") or sticker.get("file_id", "")
+        if use_tg_emoji and sticker.get("custom_emoji_id"):
+            id_value = sticker["custom_emoji_id"]
+            # emoji-id bu yerda HTML atribut ichida — bu yagona joy, tirnoqlarni ham escape qilish kerak
+            emoji_part = f'<tg-emoji emoji-id="{html.escape(id_value, quote=True)}">{placeholder}</tg-emoji>'
         else:
             id_value = sticker.get("file_id", "")
-        line = f"{i}-{placeholder} - {html.escape(str(id_value), quote=False)}"
+            emoji_part = placeholder
+        line = f"{i}-{emoji_part} - <code>{html.escape(str(id_value), quote=False)}</code>"
         if current_len + len(line) + 1 > ID_LIST_CHUNK_BUDGET and len(current_lines) > 2:
             chunks.append("\n".join(current_lines))
             current_lines = [header + " (davomi)", ""]
@@ -1304,13 +1308,28 @@ def build_pack_id_blockquote_chunks(sticker_set, pack_name):
 
 
 def send_pack_ids_full_text(chat_id, pack_name, sticker_set, business_connection_id=None):
-    chunks = build_pack_id_blockquote_chunks(sticker_set, pack_name)
+    is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
+    chunks = build_pack_id_live_chunks(sticker_set, pack_name, use_tg_emoji=is_emoji_pack)
     if not chunks:
         send_message(chat_id, "Bu pack bo'sh ko'rinadi.", business_connection_id=business_connection_id)
         return
-    for chunk in chunks:
-        text = f"<blockquote expandable>{chunk}</blockquote>"
-        send_message(chat_id, text, parse_mode_html=True, business_connection_id=business_connection_id)
+    if is_emoji_pack:
+        first = send_message(chat_id, chunks[0], parse_mode_html=True, business_connection_id=business_connection_id)
+        if not (first and first.get("ok")):
+            send_message(
+                chat_id,
+                "⚠️ Jonli emoji ko'rsatib bo'lmadi — bot egasida Telegram Premium bo'lishi kerak. "
+                "ID'larni oddiy (jonli ko'rinishsiz) formatda yuboryapman.",
+                business_connection_id=business_connection_id,
+            )
+            for chunk in build_pack_id_live_chunks(sticker_set, pack_name, use_tg_emoji=False):
+                send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
+            return
+        for chunk in chunks[1:]:
+            send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
+    else:
+        for chunk in chunks:
+            send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
 
 
 def send_custom_emoji_preview(chat_id, custom_emoji_id, placeholder_char, business_connection_id=None):
