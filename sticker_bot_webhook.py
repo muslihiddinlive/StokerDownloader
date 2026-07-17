@@ -50,6 +50,7 @@ import os
 import io
 import json
 import html
+import time
 import uuid
 import zipfile
 import hashlib
@@ -1203,7 +1204,7 @@ def extract_animation_file(msg):
 def extract_single_sticker_file(msg):
     sticker = msg.get("sticker")
     if sticker:
-        return sticker["file_id"], file_ext_for(sticker), sticker.get("emoji", ""), "sticker"
+        return sticker["file_id"], file_ext_for(sticker), sticker.get("emoji", ""), "sticker", sticker.get("custom_emoji_id")
     for field, entity_field in (("text", "entities"), ("caption", "caption_entities")):
         entities = msg.get(entity_field) or []
         for ent in entities:
@@ -1211,8 +1212,8 @@ def extract_single_sticker_file(msg):
                 data = tg_call("getCustomEmojiStickers", custom_emoji_ids=[ent["custom_emoji_id"]])
                 if data.get("ok") and data["result"]:
                     em = data["result"][0]
-                    return em["file_id"], file_ext_for(em), em.get("emoji", ""), "emoji"
-    return None, None, None, None
+                    return em["file_id"], file_ext_for(em), em.get("emoji", ""), "emoji", ent["custom_emoji_id"]
+    return None, None, None, None, None
 
 
 def zip_single_file(filename, content):
@@ -1228,61 +1229,28 @@ def zip_single_file(filename, content):
 ID_LIST_CHUNK_BUDGET = 3200  # Telegram 4096 belgi chegarasidan xavfsiz kam
 
 
-def build_raw_dump_json(update_id, msg):
-    """Berilgan xabarning Telegramdan qanday kelgani (xom update JSON'i) formatida qaytaradi."""
-    payload = {"update_id": update_id, "message": msg} if update_id is not None else {"message": msg}
-    return json.dumps(payload, ensure_ascii=False, indent=1)
+def send_clean_id(chat_id, label, emoji_char, file_id, custom_emoji_id=None, business_connection_id=None):
+    """Bot ishlata oladigan haqiqiy ID'ni (file_id, custom emoji uchun custom_emoji_id ham)
+    toza, chiziqcha bilan ajratilgan formatda yuboradi."""
+    placeholder = html.escape(emoji_char or "🔸", quote=False)
+    lines = [f"🆔 {label} ID:"]
+    if custom_emoji_id:
+        lines.append(
+            f"{placeholder} - <code>{html.escape(str(custom_emoji_id), quote=False)}</code>"
+            f"  (custom_emoji_id — jonli emoji sifatida ishlatish uchun)"
+        )
+        lines.append(f"file_id - <code>{html.escape(str(file_id), quote=False)}</code>  (faylni qayta yuborish uchun)")
+    else:
+        lines.append(f"{placeholder} - <code>{html.escape(str(file_id), quote=False)}</code>")
+    return send_message(chat_id, "\n".join(lines), parse_mode_html=True, business_connection_id=business_connection_id)
 
 
-def send_id_dump(chat_id, update_id, msg, label, business_connection_id=None):
-    """Bitta sticker/custom emoji/GIF uchun xom Telegram JSON'ini yuboradi.
-    Juda uzun bo'lsa xabar o'rniga .json fayl sifatida yuboradi."""
-    dump = build_raw_dump_json(update_id, msg)
-    text = f"🆔 {label} — xom ID ma'lumoti:\n<pre><code class=\"language-json\">{html.escape(dump, quote=False)}</code></pre>"
-    if len(text) <= ID_LIST_CHUNK_BUDGET:
-        result = send_message(chat_id, text, parse_mode_html=True, business_connection_id=business_connection_id)
-        if result and result.get("ok"):
-            return
-    send_document_bytes(
-        chat_id, f"{label.lower().replace(' ', '_')}_id.json", dump.encode("utf-8"),
-        caption=f"🆔 {label} — xom ID ma'lumoti", business_connection_id=business_connection_id,
-    )
-
-
-def _pack_id_header(sticker_set, pack_name, suffix=""):
-    title = sticker_set.get("title") or pack_name
-    return f"{html.escape(title, quote=False)} — <code>{html.escape(pack_name, quote=False)}</code>{suffix}"
-
-
-def build_pack_id_text_chunks(sticker_set, pack_name, use_tg_emoji):
-    """'N-emoji - ID' qatorlarini tayyorlaydi, Telegram xabar uzunligiga qarab bir nechta
-    xabarga bo'ladi. use_tg_emoji=True bo'lsa custom emoji <tg-emoji> orqali jonli ko'rsatiladi
-    (buning uchun bot egasida Telegram Premium bo'lishi shart — aks holda Telegram xabarni rad etadi,
-    shu holat chaqiruvchi tomonda tekshiriladi va oddiy formatga o'tiladi)."""
-    stickers = sticker_set.get("stickers", [])
-    header = _pack_id_header(sticker_set, pack_name)
-    chunks = []
-    current_lines = [header, ""]
-    current_len = len(header) + 1
-    for i, sticker in enumerate(stickers, start=1):
-        placeholder = html.escape(sticker.get("emoji") or "🔸", quote=False)
-        if use_tg_emoji and sticker.get("custom_emoji_id"):
-            id_value = sticker["custom_emoji_id"]
-            # emoji-id bu yerda HTML atribut ichida — bu yagona joy, tirnoqlarni ham escape qilish kerak
-            emoji_part = f'<tg-emoji emoji-id="{html.escape(id_value, quote=True)}">{placeholder}</tg-emoji>'
-        else:
-            id_value = sticker.get("file_id", "")
-            emoji_part = placeholder
-        line = f"{i}-{emoji_part} - <code>{html.escape(str(id_value), quote=False)}</code>"
-        if current_len + len(line) + 1 > ID_LIST_CHUNK_BUDGET and len(current_lines) > 2:
-            chunks.append("\n".join(current_lines))
-            current_lines = [_pack_id_header(sticker_set, pack_name, " (davomi)"), ""]
-            current_len = len(current_lines[0]) + 1
-        current_lines.append(line)
-        current_len += len(line) + 1
-    if len(current_lines) > 2:
-        chunks.append("\n".join(current_lines))
-    return chunks
+def _respect_retry_after(result):
+    """Telegram 429 (flood) qaytarsa, ko'rsatilgan vaqtcha kutadi."""
+    if result and not result.get("ok"):
+        retry_after = (result.get("parameters") or {}).get("retry_after")
+        if retry_after:
+            time.sleep(min(retry_after, 30) + 0.5)
 
 
 def build_pack_id_txt_content(sticker_set, pack_name):
@@ -1298,37 +1266,79 @@ def build_pack_id_txt_content(sticker_set, pack_name):
     return "\n".join(lines)
 
 
-def send_pack_ids_as_text(chat_id, pack_name, sticker_set, business_connection_id=None):
-    is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
-    chunks = build_pack_id_text_chunks(sticker_set, pack_name, use_tg_emoji=is_emoji_pack)
-    if not chunks:
-        send_message(chat_id, "Bu pack bo'sh ko'rinadi.", business_connection_id=business_connection_id)
-        return
-    if is_emoji_pack:
-        first = send_message(chat_id, chunks[0], parse_mode_html=True, business_connection_id=business_connection_id)
-        if not (first and first.get("ok")):
-            send_message(
-                chat_id,
-                "⚠️ Custom emoji'larni jonli ko'rsatib bo'lmadi — buning uchun bot egasida Telegram "
-                "Premium bo'lishi kerak. ID'larni oddiy (jonli ko'rinishsiz) formatda yuboryapman.",
-                business_connection_id=business_connection_id,
-            )
-            for chunk in build_pack_id_text_chunks(sticker_set, pack_name, use_tg_emoji=False):
-                send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
-            return
-        for chunk in chunks[1:]:
-            send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
-    else:
-        for chunk in chunks:
-            send_message(chat_id, chunk, parse_mode_html=True, business_connection_id=business_connection_id)
-
-
 def send_pack_ids_as_txt_file(chat_id, pack_name, sticker_set, business_connection_id=None):
     content = build_pack_id_txt_content(sticker_set, pack_name)
     send_document_bytes(
         chat_id, f"{pack_name}_id.txt", content.encode("utf-8"),
         caption=f"{pack_name} — barcha ID'lar", business_connection_id=business_connection_id,
     )
+
+
+def build_pack_id_blockquote_chunks(sticker_set, pack_name):
+    """'Matn - to'liq' varianti: Telegram qoidasiga ko'ra blockquote ichida boshqa formatlash
+    (code, tg-emoji) bo'lishi mumkin emas, shu sabab bu yerda ID'lar oddiy matn, lekin butun
+    blok expandable blockquote ichida — bitta tap bilan yig'ish/yoyish va to'liq nusxalash uchun."""
+    stickers = sticker_set.get("stickers", [])
+    title = sticker_set.get("title") or pack_name
+    is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
+    header = f"{html.escape(title, quote=False)} - {html.escape(pack_name, quote=False)}"
+    chunks = []
+    current_lines = [header, ""]
+    current_len = len(header) + 1
+    for i, sticker in enumerate(stickers, start=1):
+        placeholder = html.escape(sticker.get("emoji") or "🔸", quote=False)
+        if is_emoji_pack:
+            id_value = sticker.get("custom_emoji_id") or sticker.get("file_id", "")
+        else:
+            id_value = sticker.get("file_id", "")
+        line = f"{i}-{placeholder} - {html.escape(str(id_value), quote=False)}"
+        if current_len + len(line) + 1 > ID_LIST_CHUNK_BUDGET and len(current_lines) > 2:
+            chunks.append("\n".join(current_lines))
+            current_lines = [header + " (davomi)", ""]
+            current_len = len(current_lines[0]) + 1
+        current_lines.append(line)
+        current_len += len(line) + 1
+    if len(current_lines) > 2:
+        chunks.append("\n".join(current_lines))
+    return chunks
+
+
+def send_pack_ids_full_text(chat_id, pack_name, sticker_set, business_connection_id=None):
+    chunks = build_pack_id_blockquote_chunks(sticker_set, pack_name)
+    if not chunks:
+        send_message(chat_id, "Bu pack bo'sh ko'rinadi.", business_connection_id=business_connection_id)
+        return
+    for chunk in chunks:
+        text = f"<blockquote expandable>{chunk}</blockquote>"
+        send_message(chat_id, text, parse_mode_html=True, business_connection_id=business_connection_id)
+
+
+def send_pack_ids_sequential(chat_id, pack_name, sticker_set, business_connection_id=None):
+    """Har bir element uchun: avval o'sha stiker/emojining o'zini, keyin uning ID'sini
+    alohida xabar qilib yuboradi. Katta pack'larda flood-limitga tegmaslik uchun orada
+    kichik pauza bor va Telegram 429 qaytarsa retry_after'ga qarab kutiladi."""
+    is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
+    stickers = sticker_set.get("stickers", [])
+    if not stickers:
+        send_message(chat_id, "Bu pack bo'sh ko'rinadi.", business_connection_id=business_connection_id)
+        return
+    send_message(
+        chat_id, f"📦 {pack_name} — {len(stickers)} ta element, birma-bir yuboryapman...",
+        business_connection_id=business_connection_id,
+    )
+    for i, sticker in enumerate(stickers, start=1):
+        file_id = sticker.get("file_id")
+        if not file_id:
+            continue
+        r1 = send_sticker_by_file_id(chat_id, file_id, business_connection_id=business_connection_id)
+        _respect_retry_after(r1)
+        custom_emoji_id = sticker.get("custom_emoji_id") if is_emoji_pack else None
+        r2 = send_clean_id(
+            chat_id, f"{i}/{len(stickers)}", sticker.get("emoji"), file_id, custom_emoji_id,
+            business_connection_id=business_connection_id,
+        )
+        _respect_retry_after(r2)
+        time.sleep(0.35)
 
 
 def convert_to_webm(content_bytes):
@@ -1370,7 +1380,7 @@ def _handle_id_single_request_sync(chat_id, pending, requester_id):
         return
     kind_label = "Custom emoji" if pending.get("kind") == "emoji" else "Sticker"
     register_request(requester_id, kind=f"{pending.get('kind', 'sticker')}_id", detail="raw_id")
-    send_id_dump(chat_id, pending.get("update_id"), pending["raw_message"], kind_label)
+    send_clean_id(chat_id, kind_label, pending.get("emoji_char"), pending["file_id"], pending.get("custom_emoji_id"))
     notify_admin(f"✅ {kind_label} ID so'raldi\nKimdan: {pending['requester_info']}")
 
 
@@ -1395,8 +1405,10 @@ def _handle_id_pack_request_sync(chat_id, pack_name, requester_info, requester_i
     register_request(requester_id, kind="pack_id", detail=pack_name)
     if mode == "txt":
         send_pack_ids_as_txt_file(chat_id, pack_name, sticker_set)
+    elif mode == "seq":
+        send_pack_ids_sequential(chat_id, pack_name, sticker_set)
     else:
-        send_pack_ids_as_text(chat_id, pack_name, sticker_set)
+        send_pack_ids_full_text(chat_id, pack_name, sticker_set)
     notify_admin(
         f"✅ Pack ID so'raldi ({mode})\nKimdan: {requester_info}\nPack: {pack_name}\n"
         f"Fayllar soni: {len(sticker_set.get('stickers', []))}"
@@ -1448,7 +1460,7 @@ def _handle_gif_id_request_sync(chat_id, pending, requester_id):
         send_message(chat_id, reason)
         return
     register_request(requester_id, kind="gif_id", detail="gif_id")
-    send_id_dump(chat_id, pending.get("update_id"), pending["raw_message"], "GIF")
+    send_clean_id(chat_id, "GIF", "🎞", pending["file_id"])
     notify_admin(f"✅ GIF ID so'raldi\nKimdan: {pending['requester_info']}")
 
 
@@ -1465,7 +1477,7 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
     if not allowed:
         send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
         return
-    file_id, ext, emoji_char, kind = extract_single_sticker_file(reply)
+    file_id, ext, emoji_char, kind, _ = extract_single_sticker_file(reply)
     if not file_id:
         send_message(chat_id, "Bu xabarda sticker/custom emoji topilmadi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
@@ -1961,7 +1973,7 @@ def handle_callback_query(cq):
         )
         return
 
-    if data.startswith("idpack_text:") or data.startswith("idpack_txt:"):
+    if data.startswith("idpack_txt:"):
         answer_callback_query(cq_id)
         token = data.split(":", 1)[1]
         pending = pop_pending_choice(token)
@@ -1969,7 +1981,37 @@ def handle_callback_query(cq):
             edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Stikerni qayta forward qiling.")
             return
         edit_message_text(chat_id, message_id, "⏳ Tayyorlanmoqda...")
-        mode = "txt" if data.startswith("idpack_txt:") else "text"
+        handle_id_pack_request(chat_id, pending["pack_name"], pending["requester_info"], user_id, "txt")
+        return
+
+    if data.startswith("idpack_text:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Stikerni qayta forward qiling.")
+            return
+        token3 = store_pending_choice({
+            "pack_name": pending["pack_name"], "requester_info": pending["requester_info"],
+        })
+        edit_message_text(
+            chat_id, message_id, "Qaysi ko'rinishda kelsin?",
+            reply_markup={"inline_keyboard": [
+                [{"text": "🖼 Avval stiker, keyin ID'si", "callback_data": f"idpack_seq:{token3}"}],
+                [{"text": "📋 Matn - to'liq", "callback_data": f"idpack_full:{token3}"}],
+            ]},
+        )
+        return
+
+    if data.startswith("idpack_seq:") or data.startswith("idpack_full:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Stikerni qayta forward qiling.")
+            return
+        edit_message_text(chat_id, message_id, "⏳ Tayyorlanmoqda...")
+        mode = "seq" if data.startswith("idpack_seq:") else "full"
         handle_id_pack_request(chat_id, pending["pack_name"], pending["requester_info"], user_id, mode)
         return
 
@@ -2994,7 +3036,7 @@ def webhook():
         return {"ok": True}
 
     # ---- Bitta sticker/custom emoji forward qilindi: tanlov beramiz ----
-    file_id, ext, emoji_char, sticker_kind = extract_single_sticker_file(msg)
+    file_id, ext, emoji_char, sticker_kind, custom_emoji_id = extract_single_sticker_file(msg)
     if file_id:
         if not enforce_force_join(chat_id, user_id):
             return {"ok": True}
@@ -3002,7 +3044,7 @@ def webhook():
         token = store_pending_choice({
             "pack_name": pack_name, "file_id": file_id, "ext": ext,
             "emoji_char": emoji_char, "requester_info": requester_info, "kind": sticker_kind,
-            "raw_message": msg, "update_id": update.get("update_id"),
+            "raw_message": msg, "update_id": update.get("update_id"), "custom_emoji_id": custom_emoji_id,
         })
         keyboard_rows = [[{"text": "💾 Faqat shu stiker/emojini ZIP qilish", "callback_data": f"dl_single:{token}"}]]
         if pack_name:
@@ -3033,7 +3075,12 @@ def webhook():
     if pack_name:
         if not enforce_force_join(chat_id, user_id):
             return {"ok": True}
-        handle_pack_request(chat_id, pack_name, requester_info, user_id)
+        token = store_pending_choice({"pack_name": pack_name, "requester_info": requester_info})
+        keyboard_rows = [
+            [{"text": "📦 Butun pack'ni ZIP qilib olish", "callback_data": f"dl_pack:{token}"}],
+            [{"text": "🆔 Butun pack ID'larini berish", "callback_data": f"dl_id_pack:{token}"}],
+        ]
+        send_message(chat_id, "Nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
         return {"ok": True}
 
     send_message(chat_id, "Sticker/emoji/GIF forward qiling yoki pastdagi menyudan foydalaning 👇",
