@@ -1313,10 +1313,28 @@ def send_pack_ids_full_text(chat_id, pack_name, sticker_set, business_connection
         send_message(chat_id, text, parse_mode_html=True, business_connection_id=business_connection_id)
 
 
+def send_custom_emoji_preview(chat_id, custom_emoji_id, placeholder_char, business_connection_id=None):
+    """Custom emoji sendSticker orqali ko'rinmaydi — Telegram uni faqat matn ichida
+    (<tg-emoji>) ko'rsatishga ruxsat beradi, shu uchun shu yo'l bilan yuboramiz. Buning
+    uchun bot egasida Telegram Premium bo'lishi shart; bo'lmasa xato qaytadi va oddiy
+    ogohlantirish bilan davom etamiz (oqim to'xtamaydi)."""
+    placeholder = html.escape(placeholder_char or "🔸", quote=False)
+    text = f'<tg-emoji emoji-id="{html.escape(custom_emoji_id, quote=True)}">{placeholder}</tg-emoji>'
+    result = send_message(chat_id, text, parse_mode_html=True, business_connection_id=business_connection_id)
+    if not (result and result.get("ok")):
+        send_message(
+            chat_id,
+            f"{placeholder} (jonli ko'rinishni yubora olmadim — bot egasida Telegram Premium kerak)",
+            business_connection_id=business_connection_id,
+        )
+    return result
+
+
 def send_pack_ids_sequential(chat_id, pack_name, sticker_set, business_connection_id=None):
-    """Har bir element uchun: avval o'sha stiker/emojining o'zini, keyin uning ID'sini
-    alohida xabar qilib yuboradi. Katta pack'larda flood-limitga tegmaslik uchun orada
-    kichik pauza bor va Telegram 429 qaytarsa retry_after'ga qarab kutiladi."""
+    """Har bir element uchun: avval o'sha stiker/emojining o'zini (custom emoji bo'lsa jonli
+    ko'rinishini, oddiy sticker bo'lsa sendSticker orqali), keyin uning ID'sini alohida xabar
+    qilib yuboradi. Katta pack'larda flood-limitga tegmaslik uchun orada kichik pauza bor va
+    Telegram 429 qaytarsa retry_after'ga qarab kutiladi."""
     is_emoji_pack = sticker_set.get("sticker_type") == "custom_emoji"
     stickers = sticker_set.get("stickers", [])
     if not stickers:
@@ -1330,9 +1348,12 @@ def send_pack_ids_sequential(chat_id, pack_name, sticker_set, business_connectio
         file_id = sticker.get("file_id")
         if not file_id:
             continue
-        r1 = send_sticker_by_file_id(chat_id, file_id, business_connection_id=business_connection_id)
-        _respect_retry_after(r1)
         custom_emoji_id = sticker.get("custom_emoji_id") if is_emoji_pack else None
+        if custom_emoji_id:
+            r1 = send_custom_emoji_preview(chat_id, custom_emoji_id, sticker.get("emoji"), business_connection_id)
+        else:
+            r1 = send_sticker_by_file_id(chat_id, file_id, business_connection_id=business_connection_id)
+        _respect_retry_after(r1)
         r2 = send_clean_id(
             chat_id, f"{i}/{len(stickers)}", sticker.get("emoji"), file_id, custom_emoji_id,
             business_connection_id=business_connection_id,
