@@ -139,17 +139,39 @@ def tg_call(method, **params):
     return data
 
 
-def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_markup=None, business_connection_id=None):
-    params = {"chat_id": chat_id, "text": text}
+def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_markup=None,
+                  business_connection_id=None, entities=None, add_signature=True):
+    send_text, send_entities = text, entities
+    sig_id = get_signature_emoji() if (add_signature and not entities) else None
+    if sig_id:
+        placeholder = get_signature_placeholder()
+        if parse_mode_html:
+            send_text = f'{text} <tg-emoji emoji-id="{html.escape(sig_id, quote=True)}">{html.escape(placeholder, quote=False)}</tg-emoji>'
+        else:
+            base_len = utf16_len(text)
+            send_text = f"{text} {placeholder}"
+            send_entities = [{"type": "custom_emoji", "offset": base_len + 1,
+                               "length": utf16_len(placeholder), "custom_emoji_id": sig_id}]
+
+    params = {"chat_id": chat_id, "text": send_text}
     if reply_to:
         params["reply_to_message_id"] = reply_to
-    if parse_mode_html:
+    if send_entities:
+        params["entities"] = send_entities  # entities va parse_mode birga bo'lmaydi
+    elif parse_mode_html:
         params["parse_mode"] = "HTML"
     if reply_markup:
         params["reply_markup"] = reply_markup
     if business_connection_id:
         params["business_connection_id"] = business_connection_id
-    return tg_call("sendMessage", **params)
+    result = tg_call("sendMessage", **params)
+
+    if sig_id and not (result and result.get("ok")):
+        # Imzo (premium emoji) rad etildi — original xabarni imzosiz, o'zgarishsiz qayta yuboramiz
+        return send_message(chat_id, text, reply_to=reply_to, parse_mode_html=parse_mode_html,
+                             reply_markup=reply_markup, business_connection_id=business_connection_id,
+                             entities=entities, add_signature=False)
+    return result
 
 
 def edit_message_text(chat_id, message_id, text, parse_mode_html=False, reply_markup=None):
@@ -255,13 +277,25 @@ def notify_admin(text):
         send_message(SUPERADMIN_ID, text)
 
 
-def react(chat_id, message_id, emoji=None):
-    tg_call(
-        "setMessageReaction",
-        chat_id=chat_id,
-        message_id=message_id,
-        reaction=[{"type": "emoji", "emoji": emoji or get_reaction_emoji()}],
-    )
+def react(chat_id, message_id, emoji=None, custom_emoji_id=None):
+    if custom_emoji_id:
+        reaction = [{"type": "custom_emoji", "custom_emoji_id": custom_emoji_id}]
+    else:
+        reaction = [{"type": "emoji", "emoji": emoji or get_reaction_emoji()}]
+    return tg_call("setMessageReaction", chat_id=chat_id, message_id=message_id, reaction=reaction)
+
+
+def react_with_kind(chat_id, message_id, kind):
+    """REACTION_KIND_CONFIG'dagi kindga (admin/superadmin/channel) mos sozlangan
+    reaksiyani qo'yadi — oddiy emoji yoki premium (custom_emoji_id) bo'lishi mumkin."""
+    rtype, value = get_reaction_config_for(kind)
+    if rtype == "custom_emoji":
+        result = react(chat_id, message_id, custom_emoji_id=value)
+        if not (result and result.get("ok")):
+            # Guruh custom emoji reaksiyaga ruxsat bermagan bo'lishi mumkin — oddiyga tushamiz
+            react(chat_id, message_id, emoji=DEFAULT_REACTION_EMOJI)
+        return result
+    return react(chat_id, message_id, emoji=value)
 
 
 def delete_message(chat_id, message_id):
@@ -496,15 +530,63 @@ REACTION_KIND_CONFIG = {
 }
 
 
-def get_reaction_emoji_for(kind):
+def utf16_len(s):
+    """Telegram entity offset/length UTF-16 kod birliklarida hisoblanadi, Python belgi
+    soni bilan emas — ba'zi emoji surrogate juftlik sifatida 2 birlik egallaydi."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def get_signature_emoji():
+    cfg = get_limit_config().get("signature_emoji")
+    return cfg.get("custom_emoji_id") if isinstance(cfg, dict) else None
+
+
+def get_signature_placeholder():
+    cfg = get_limit_config().get("signature_emoji")
+    return ((cfg or {}).get("placeholder") if isinstance(cfg, dict) else None) or "✨"
+
+
+def set_signature_emoji(custom_emoji_id, placeholder="✨"):
+    with _state_lock:
+        STATE.setdefault("config", {})["signature_emoji"] = {
+            "custom_emoji_id": custom_emoji_id, "placeholder": placeholder,
+        }
+        save_state_locked()
+
+
+def clear_signature_emoji():
+    with _state_lock:
+        STATE.setdefault("config", {}).pop("signature_emoji", None)
+        save_state_locked()
+
+
+def get_reaction_config_for(kind):
+    """(reaction_type, value) qaytaradi: ('emoji', '👍') yoki ('custom_emoji', '123...')."""
     key, _ = REACTION_KIND_CONFIG[kind]
-    return get_limit_config().get(key, DEFAULT_REACTION_EMOJI)
+    cfg = get_limit_config().get(key)
+    if isinstance(cfg, dict) and cfg.get("value"):
+        return cfg.get("type", "emoji"), cfg["value"]
+    if isinstance(cfg, str) and cfg:
+        return "emoji", cfg  # eski (faqat oddiy emoji) format bilan moslik
+    return "emoji", DEFAULT_REACTION_EMOJI
+
+
+def get_reaction_emoji_for(kind):
+    """Eski nom bilan moslik — faqat qiymatni (emoji yoki custom_emoji_id) qaytaradi."""
+    return get_reaction_config_for(kind)[1]
 
 
 def set_reaction_emoji_for(kind, emoji):
     key, _ = REACTION_KIND_CONFIG[kind]
     with _state_lock:
-        STATE.setdefault("config", {})[key] = emoji
+        STATE.setdefault("config", {})[key] = {"type": "emoji", "value": emoji}
+        save_state_locked()
+
+
+def set_reaction_custom_emoji_for(kind, custom_emoji_id):
+    key, _ = REACTION_KIND_CONFIG[kind]
+    with _state_lock:
+        STATE.setdefault("config", {})[key] = {"type": "custom_emoji", "value": custom_emoji_id}
         save_state_locked()
 
 
@@ -723,14 +805,17 @@ def get_user_keywords(user_id):
         return list(STATE.setdefault("keywords", {}).get(str(user_id), []))
 
 
-def add_keyword(user_id, trigger, ktype, response):
+def add_keyword(user_id, trigger, ktype, response, entities=None):
     with _state_lock:
         kws = STATE.setdefault("keywords", {}).setdefault(str(user_id), [])
         limit = get_keyword_limit(user_id)
         if limit is not None and len(kws) >= limit:
             return False, f"Limitingiz {limit} ta. Premium (100 Stars) olsangiz cheksiz bo'ladi."
         kw_id = uuid.uuid4().hex[:8]
-        kws.append({"id": kw_id, "trigger": trigger, "type": ktype, "response": response})
+        kw = {"id": kw_id, "trigger": trigger, "type": ktype, "response": response}
+        if entities:
+            kw["entities"] = entities
+        kws.append(kw)
         save_state_locked()
         return True, kw_id
 
@@ -745,19 +830,51 @@ def delete_keyword(user_id, kw_id):
 
 
 def find_keyword_response(owner_id, text):
+    """(response_text, entities) qaytaradi — entities bo'lmasa None."""
     kws = get_user_keywords(owner_id)
     text_l = (text or "").lower().strip()
     if not text_l:
-        return None
+        return None, None
     fallback = None
     for kw in kws:
         if kw.get("type") == "any":
-            fallback = kw.get("response")
+            fallback = kw
             continue
         trig = (kw.get("trigger") or "").lower().strip()
         if trig and trig in text_l:
-            return kw.get("response")
-    return fallback
+            return kw.get("response"), kw.get("entities")
+    if fallback:
+        return fallback.get("response"), fallback.get("entities")
+    return None, None
+
+
+# ---------- Offline/away — javobni kechiktirish ----------
+# Telegram Bot API foydalanuvchining online/offline holatini bermaydi, shu sabab
+# "N soniya ichida egasi shu chatga o'zi yozmasa" tarzida amalga oshiriladi — bu
+# amalda xuddi "away" kabi ishlaydi va rasmiy API orqali ishonchli aniqlanadi.
+
+def get_away_delay(owner_id):
+    """0 = kechikishsiz (darhol), aks holda soniya."""
+    with _state_lock:
+        return int(STATE.setdefault("away_delay", {}).get(str(owner_id), 0))
+
+
+def set_away_delay(owner_id, seconds):
+    with _state_lock:
+        STATE.setdefault("away_delay", {})[str(owner_id)] = max(0, int(seconds))
+        save_state_locked()
+
+
+def mark_owner_activity(owner_id, chat_id):
+    with _state_lock:
+        STATE.setdefault("owner_activity", {})[f"{owner_id}:{chat_id}"] = time.time()
+        save_state_locked()
+
+
+def owner_replied_since(owner_id, chat_id, since_ts):
+    with _state_lock:
+        ts = STATE.get("owner_activity", {}).get(f"{owner_id}:{chat_id}")
+        return bool(ts and ts > since_ts)
 
 
 def grant_premium(user_id, days=182):
@@ -1675,6 +1792,7 @@ def admin_panel_keyboard(user_id):
             {"text": "🛡 Adminlar", "callback_data": "panel_admins"},
             {"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"},
         ])
+        rows.append([{"text": "✨ Bot imzosi (premium emoji)", "callback_data": "panel_signature"}])
         rows.append([
             {"text": "🏆 Referal reyting", "callback_data": "panel_leaderboard"},
             {"text": "📤 Eksport (CSV)", "callback_data": "panel_export"},
@@ -1837,16 +1955,21 @@ def handle_callback_query(cq):
         kws = get_user_keywords(user_id)
         limit = get_keyword_limit(user_id)
         limit_text = "cheksiz" if limit is None else f"{len(kws)}/{limit}"
+        delay = get_away_delay(user_id)
+        delay_text = "darhol (kechikishsiz)" if delay == 0 else f"{delay} soniya kutib, keyin"
         text = (
             "🔑 <b>Avto-javob (Telegram Business)</b>\n\n"
             "Bu kalitlar faqat profilingizga Business orqali ulangan botga "
             "boshqalar yozganda ishlaydi.\n\n"
-            f"Joriy: {limit_text}\n\n"
+            f"Joriy: {limit_text}\n"
+            f"⏱ Javob: {delay_text}\n\n"
             "Masalan: kimdir \"salom\" desa, bot avtomatik javob yozadi."
         )
         rows = []
         for kw in kws:
             label = "🌐 Har qanday xabar" if kw["type"] == "any" else f"🎯 «{kw['trigger']}»"
+            if kw.get("entities"):
+                label += " ✨"
             rows.append([
                 {"text": label, "callback_data": f"kw_view:{kw['id']}"},
                 {"text": "🗑", "callback_data": f"kw_delete:{kw['id']}"},
@@ -1855,8 +1978,20 @@ def handle_callback_query(cq):
             rows.append([{"text": "➕ Yangi kalit qo'shish", "callback_data": "kw_add_start"}])
         else:
             rows.append([{"text": "⭐ Premium olish (cheksiz)", "callback_data": "menu_premium"}])
+        rows.append([{"text": "⏱ Javob kechikishini sozlash (offline)", "callback_data": "kw_delay_start"}])
         rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "kw_delay_start":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "away_delay")
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Necha soniya kutilsin? Shu vaqt ichida o'zingiz yozib ulgurmasangiz, "
+            "avto-javob ishga tushadi.\n\n0 — darhol javob (kechikishsiz).",
+            reply_markup=back_to_menu_keyboard(),
+        )
         return
 
     if data == "kw_add_start":
@@ -1908,7 +2043,8 @@ def handle_callback_query(cq):
                                reply_markup={"inline_keyboard": [[{"text": "⬅️ Kalitlarim", "callback_data": "menu_keywords"}]]})
             return
         trig = "Har qanday xabar" if kw["type"] == "any" else kw["trigger"]
-        text = f"🎯 Kalit: {trig}\n💬 Javob: {kw['response']}"
+        note = "\n✨ (bu javobda maxsus formatlash/premium emoji bor — shu yerda oddiy ko'rinadi, jo'natilganda to'g'ri chiqadi)" if kw.get("entities") else ""
+        text = f"🎯 Kalit: {trig}\n💬 Javob: {kw['response']}{note}"
         rows = [[{"text": "🗑 O'chirish", "callback_data": f"kw_delete:{kw['id']}"}],
                 [{"text": "⬅️ Kalitlarim", "callback_data": "menu_keywords"}]]
         safe_edit_or_send(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
@@ -2577,13 +2713,73 @@ def handle_callback_query(cq):
         if user_id != SUPERADMIN_ID:
             return
         kind = data.split(":", 1)[1]
-        current = get_reaction_emoji_for(kind)
+        current_type, current_value = get_reaction_config_for(kind)
         _, label = REACTION_KIND_CONFIG[kind]
-        rows = [[{"text": (f"✅ {e}" if e == current else e), "callback_data": f"set_reaction:{kind}:{e}"}]
+        current_text = f"✨ premium (ID: {current_value})" if current_type == "custom_emoji" else current_value
+        rows = [[{"text": (f"✅ {e}" if current_type == "emoji" and e == current_value else e),
+                  "callback_data": f"set_reaction:{kind}:{e}"}]
                 for e in REACTION_EMOJI_CHOICES]
+        rows.append([{"text": "✨ Premium emoji (ID orqali)", "callback_data": f"set_reaction_custom:{kind}"}])
         rows.append([{"text": "⬅️ Orqaga", "callback_data": "panel_reaction"}])
-        safe_edit_or_send(chat_id, message_id, f"{label} (hozirgi: {current}):",
+        safe_edit_or_send(chat_id, message_id, f"{label} (hozirgi: {current_text}):",
                            reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("set_reaction_custom:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        kind = data.split(":", 1)[1]
+        set_pending_input(user_id, "reaction_custom", {"kind": kind})
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Premium emojini yuboring (o'sha emojining o'zini yozib/tashlab) "
+            "yoki uning ID raqamini yozing.\n\n"
+            "⚠️ Eslatma: guruhda custom emoji reaksiyaga ruxsat berilgan bo'lishi kerak "
+            "(guruh sozlamalari → Reactions), aks holda Telegram rad etadi va oddiy emojiga tushib qoladi.",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    if data == "panel_signature":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        sig_id = get_signature_emoji()
+        status = f"yoqilgan ✅ (ID: {sig_id})" if sig_id else "o'chirilgan"
+        text = (
+            "✨ <b>Bot imzosi</b>\n\n"
+            "Yoqilsa, bot yuboradigan (deyarli) har bir oddiy xabar oxiriga shu premium "
+            "emoji avtomatik qo'shiladi — botga bir xil, tanib bo'ladigan uslub beradi.\n\n"
+            "Eslatma: bu SENING akkountingda Telegram Premium borligiga bog'liq (bot sen "
+            "yaratgan bot bo'lgani uchun); bo'lmasa Telegram rad etadi va imzosiz ketaveradi.\n\n"
+            f"Holati: {status}"
+        )
+        rows = [[{"text": "✨ O'rnatish/almashtirish", "callback_data": "set_signature_start"}]]
+        if sig_id:
+            rows.append([{"text": "🚫 O'chirish", "callback_data": "clear_signature"}])
+        rows.append([{"text": "⬅️ Boshqaruv paneli", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "set_signature_start":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "signature_custom")
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Imzo qilib qo'yiladigan premium emojini yuboring (uning o'zini) yoki ID raqamini yozing.",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    if data == "clear_signature":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        clear_signature_emoji()
+        safe_edit_or_send(chat_id, message_id, "✅ Bot imzosi o'chirildi.", reply_markup=back_to_menu_keyboard())
         return
 
     if data.startswith("set_reaction:"):
@@ -2612,7 +2808,17 @@ def handle_callback_query(cq):
 
 # ---------- Superadmin/admin panelining matnli (pending_input) javoblari ----------
 
-def handle_pending_input(chat_id, user_id, text):
+def _extract_custom_emoji_id(text, entities):
+    """Xabarda haqiqiy custom emoji bo'lsa uning ID'sini oladi, bo'lmasa qo'lda
+    yozilgan raqamli ID'ni qabul qiladi."""
+    for ent in (entities or []):
+        if ent.get("type") == "custom_emoji" and ent.get("custom_emoji_id"):
+            return ent["custom_emoji_id"]
+    raw = (text or "").strip()
+    return raw if raw.isdigit() else None
+
+
+def handle_pending_input(chat_id, user_id, text, entities=None):
     """True qaytarsa — xabar shu yerda to'liq qayta ishlangan (webhook to'xtaydi)."""
     pending = get_pending_input(user_id)
     if not pending:
@@ -2645,11 +2851,66 @@ def handle_pending_input(chat_id, user_id, text):
             send_message(chat_id, "Bo'sh bo'lishi mumkin emas. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
             return True
         data = pending.get("data") or {}
-        ok, result = add_keyword(user_id, data.get("trigger", "*"), data.get("type", "exact"), response)
+        ok, result = add_keyword(user_id, data.get("trigger", "*"), data.get("type", "exact"), response, entities)
         if ok:
-            send_message(chat_id, "✅ Kalit qo'shildi.", reply_markup=back_to_menu_keyboard())
+            note = " (premium emoji/formatlash saqlandi ✨)" if entities else ""
+            send_message(chat_id, f"✅ Kalit qo'shildi.{note}", reply_markup=back_to_menu_keyboard())
         else:
             send_message(chat_id, f"❌ {result}", reply_markup=back_to_menu_keyboard())
+        return True
+
+    if action == "reaction_custom":
+        clear_pending_input(user_id)
+        data = pending.get("data") or {}
+        kind = data.get("kind")
+        custom_emoji_id = _extract_custom_emoji_id(text, entities)
+        if not custom_emoji_id or kind not in REACTION_KIND_CONFIG:
+            send_message(chat_id, "ID topilmadi. Premium emojining o'zini yuboring yoki uning raqamli ID'sini yozing.",
+                         reply_markup=back_to_menu_keyboard())
+            return True
+        set_reaction_custom_emoji_for(kind, custom_emoji_id)
+        _, label = REACTION_KIND_CONFIG[kind]
+        send_message(chat_id, f"✅ {label} endi premium emoji: ID {custom_emoji_id}",
+                     reply_markup=back_to_menu_keyboard())
+        return True
+
+    if action == "signature_custom":
+        clear_pending_input(user_id)
+        custom_emoji_id = _extract_custom_emoji_id(text, entities)
+        if not custom_emoji_id:
+            send_message(chat_id, "ID topilmadi. Premium emojining o'zini yuboring yoki uning raqamli ID'sini yozing.",
+                         reply_markup=back_to_menu_keyboard())
+            return True
+        placeholder = None
+        for ent in (entities or []):
+            if ent.get("type") == "custom_emoji" and ent.get("custom_emoji_id") == custom_emoji_id:
+                # UTF-16 offset/length'dan asl placeholder belgisini ajratib olamiz
+                raw = text.encode("utf-16-le")
+                start, end = ent["offset"] * 2, (ent["offset"] + ent["length"]) * 2
+                placeholder = raw[start:end].decode("utf-16-le")
+                break
+        set_signature_emoji(custom_emoji_id, placeholder or "✨")
+        send_message(chat_id, f"✅ Bot imzosi o'rnatildi (ID: {custom_emoji_id}). "
+                              f"Endi shu bilan yuboraman:", reply_markup=back_to_menu_keyboard())
+        return True
+
+    if action == "away_delay":
+        clear_pending_input(user_id)
+        raw = text.strip()
+        try:
+            seconds = int(raw)
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting (soniya), masalan: 60", reply_markup=back_to_menu_keyboard())
+            return True
+        if seconds < 0:
+            send_message(chat_id, "0 yoki musbat son bo'lishi kerak.", reply_markup=back_to_menu_keyboard())
+            return True
+        set_away_delay(user_id, seconds)
+        if seconds == 0:
+            send_message(chat_id, "✅ Kechikish o'chirildi — javoblar darhol ketadi.", reply_markup=back_to_menu_keyboard())
+        else:
+            send_message(chat_id, f"✅ Endi siz {seconds} soniya ichida o'zingiz javob yozmasangiz, "
+                                   f"avto-javob ishga tushadi.", reply_markup=back_to_menu_keyboard())
         return True
 
     # Quyidagilar faqat adminlar uchun ishlaydi:
@@ -2781,6 +3042,23 @@ def get_business_owner(connection_id):
         return conn.get("owner_id") if conn else None
 
 
+def send_auto_reply(chat_id, text, entities, business_connection_id):
+    """Kalit so'z javobini yuboradi. entities bo'lsa (masalan premium emoji) shu bilan
+    urinadi; Telegram rad etsa (masalan bot egasida Telegram Premium bo'lmasa), oddiy
+    matn sifatida qayta yuboradi — javob baribir yetib boradi."""
+    result = send_message(chat_id, text, entities=entities, business_connection_id=business_connection_id)
+    if entities and not (result and result.get("ok")):
+        result = send_message(chat_id, text, business_connection_id=business_connection_id)
+    return result
+
+
+def _delayed_auto_reply(owner_id, chat_id, text, entities, business_connection_id, trigger_ts, delay):
+    time.sleep(delay)
+    if owner_replied_since(owner_id, chat_id, trigger_ts):
+        return  # egasi shu orada o'zi javob berib ulgurdi — avto-javob shart emas
+    send_auto_reply(chat_id, text, entities, business_connection_id)
+
+
 def handle_business_message(msg, business_connection_id):
     chat_id = msg["chat"]["id"]
     from_user = msg.get("from", {})
@@ -2795,6 +3073,11 @@ def handle_business_message(msg, business_connection_id):
     owner_id = get_business_owner(business_connection_id)
     is_owner = owner_id is not None and user_id == owner_id
     can_run_commands = is_owner or is_admin(user_id)
+
+    if is_owner:
+        # Egasi shu chatga o'zi yozdi (buyruq bo'lsa ham, oddiy javob bo'lsa ham) —
+        # kutilayotgan kechiktirilgan avto-javob(lar) shundan keyin o'zini bekor qiladi.
+        mark_owner_activity(owner_id, chat_id)
 
     # ---- .tgs <pack> <raqam> — faqat profil egasi (yoki bot admini) uchun ----
     if stripped.startswith(".tgs "):
@@ -2848,9 +3131,17 @@ def handle_business_message(msg, business_connection_id):
     # ---- Boshqa hamma narsa: faqat kalit so'z (avto-javob) tizimi ishlaydi ----
     # Stiker/GIF/pack-havola avtomatik qayta ishlanmaydi — buyruq berilmagunicha bot jim turadi.
     if owner_id and not is_owner:
-        reply_text = find_keyword_response(owner_id, text)
+        reply_text, reply_entities = find_keyword_response(owner_id, text)
         if reply_text:
-            send_message(chat_id, reply_text, business_connection_id=business_connection_id)
+            delay = get_away_delay(owner_id)
+            if delay > 0:
+                threading.Thread(
+                    target=_delayed_auto_reply,
+                    args=(owner_id, chat_id, reply_text, reply_entities, business_connection_id, time.time(), delay),
+                    daemon=True,
+                ).start()
+            else:
+                send_auto_reply(chat_id, reply_text, reply_entities, business_connection_id)
 
 
 # ---------- Guruh ".zip" / ".zipstiker" (moderatsion, admin-only) ----------
@@ -2985,7 +3276,7 @@ def webhook():
         chat_id = channel_post["chat"]["id"]
         register_channel(channel_post["chat"])
         if bot_is_group_admin(chat_id):
-            react(chat_id, channel_post["message_id"], emoji=get_reaction_emoji_for("channel"))
+            react_with_kind(chat_id, channel_post["message_id"], "channel")
         return {"ok": True}
 
     pre_checkout_query = update.get("pre_checkout_query")
@@ -3019,15 +3310,15 @@ def webhook():
         register_group(msg["chat"])
         if is_admin(user_id):
             reaction_kind = "superadmin" if user_id == SUPERADMIN_ID else "admin"
-            react(chat_id, msg["message_id"], emoji=get_reaction_emoji_for(reaction_kind))
+            react_with_kind(chat_id, msg["message_id"], reaction_kind)
         if text.strip().startswith("."):
             if handle_group_dot_commands(msg, chat_id, user_id, text):
                 return {"ok": True}
         reply = msg.get("reply_to_message")
         if reply and reply.get("from", {}).get("id") and is_admin(reply["from"]["id"]) and not is_admin(user_id):
-            reply_text = find_keyword_response(reply["from"]["id"], text)
+            reply_text, reply_entities = find_keyword_response(reply["from"]["id"], text)
             if reply_text:
-                send_message(chat_id, reply_text, reply_to=msg["message_id"])
+                send_message(chat_id, reply_text, reply_to=msg["message_id"], entities=reply_entities)
         return {"ok": True}
 
     # ================= Shaxsiy chat (private) =================
@@ -3035,7 +3326,7 @@ def webhook():
     register_known_user(user_id, from_user)
 
     # Superadmin panelidan kutilayotgan matn kiritish bo'lsa, avval shuni tekshiramiz:
-    if handle_pending_input(chat_id, user_id, text):
+    if handle_pending_input(chat_id, user_id, text, msg.get("entities")):
         return {"ok": True}
 
     if text.strip().startswith(".tgs "):
