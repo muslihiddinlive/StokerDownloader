@@ -81,6 +81,169 @@ FILE_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 DEFAULT_REACTION_EMOJI = "⚡"
 REACTION_EMOJI_CHOICES = ["⚡", "🔥", "❤️", "👍", "🎉", "😎", "🙏", "💯"]
 
+# .matnlar / .matn buyruqlari uchun — botdagi barcha (dublikatsiz) matn/tugma katalogi.
+# Har birining ID'si (key) shu matnning o'zidan hisoblangan barqaror hash — kod qayta
+# tuzilsa ham, matnning o'zi o'zgarmasa, key ham o'zgarmaydi. Faqat superadmin uchun.
+# ESLATMA: bu ro'yxat kod yozilgan paytda avtomatik generatsiya qilingan (statik) —
+# kelajakda yangi matn qo'shilsa, bu katalog qo'lda yangilanishi kerak.
+TEXT_CATALOG = [
+    {"n": 1, "key": "m25ccaebc", "kind": "message", "preview": "Sticker/emoji/GIF forward qiling yoki pastdagi menyudan foydalaning \U0001f447"},
+    {"n": 2, "key": "m5615f198", "kind": "message", "preview": "Nima qilishimni xohlaysiz?"},
+    {"n": 3, "key": "b3a0bebcb", "kind": "button", "preview": "\U0001f194 Butun pack ID\'larini berish"},
+    {"n": 4, "key": "b74e371db", "kind": "button", "preview": "\U0001f4e6 Butun pack\'ni ZIP qilib olish"},
+    {"n": 5, "key": "m520b8c41", "kind": "message", "preview": "GIF bilan nima qilishimni xohlaysiz?"},
+    {"n": 6, "key": "b584786e4", "kind": "button", "preview": "\U0001f194 ID sini berish"},
+    {"n": 7, "key": "b130d9467", "kind": "button", "preview": "\U0001f39e WebM qilib berish"},
+    {"n": 8, "key": "b16ef0d6b", "kind": "button", "preview": "\U0001f194 Shu stiker/emojining ID\'sini berish"},
+    {"n": 9, "key": "b1c0a429a", "kind": "button", "preview": "\U0001f4be Faqat shu stiker/emojini ZIP qilish"},
+    {"n": 10, "key": "mc57902f8", "kind": "message", "preview": "Pack manzilini/nomini aniqlab bo\'lmadi."},
+    {"n": 11, "key": "md7a7e1b3", "kind": "message", "preview": "Tartib raqami butun son bo\'lishi kerak."},
+    {"n": 12, "key": "m76ecb4e1", "kind": "message", "preview": "Format: .tgs <pack_manzili_yoki_nomi> <tartib_raqami>"},
+    {"n": 13, "key": "m6332caca", "kind": "message", "preview": "Bu buyruq faqat adminlar uchun."},
+    {"n": 14, "key": "m3da8a391", "kind": "message", "preview": "\U0001f389 Premium faollashtirildi! {until_str} sanagacha cheksiz foydalanasiz."},
+    {"n": 15, "key": "m0bb0279d", "kind": "message", "preview": "\u274c {requester_label(reply[\'from\'])} bot adminligidan olindi."},
+    {"n": 16, "key": "me48578e4", "kind": "message", "preview": "\u2705 {requester_label(reply[\'from\'])} endi bot admini."},
+    {"n": 17, "key": "mc60ea96b", "kind": "message", "preview": "Bu xabardan pack nomini topa olmadim."},
+    {"n": 18, "key": "m44e82f2d", "kind": "message", "preview": "Stiker/custom emoji xabariga reply qilib .zip yozing."},
+    {"n": 19, "key": "m677b1ae0", "kind": "message", "preview": "GIF xabariga reply qilib .zipgif yozing."},
+    {"n": 20, "key": "m290b5e85", "kind": "message", "preview": "Sticker/custom emoji xabariga reply qilib .zipstiker yozing."},
+    {"n": 21, "key": "md84ce349", "kind": "message", "preview": "Sticker/custom emoji xabariga reply qilib yozing."},
+    {"n": 22, "key": "m3649b7e8", "kind": "message", "preview": "\U0001f4e3 Xabar {sent} ta foydalanuvchiga yuborildi."},
+    {"n": 23, "key": "mbe472968", "kind": "message", "preview": "\u2705 Bonus kanal qo\'shildi: {ch[\'title\']}"},
+    {"n": 24, "key": "m8f59e82d", "kind": "message", "preview": "Kanal topilmadi. Bot shu kanalda a\'zo/admin ekanini tekshiring."},
+    {"n": 25, "key": "mc08e7370", "kind": "message", "preview": "\u2705 Majburiy kanal qo\'shildi: {ch[\'title\']}"},
+    {"n": 26, "key": "m57a14e3a", "kind": "message", "preview": "\u2705 id:{target_id} endi bot admini."},
+    {"n": 27, "key": "m321bc5a2", "kind": "message", "preview": "Butun ID kiriting. Bekor qilindi."},
+    {"n": 28, "key": "mfe36d993", "kind": "message", "preview": "\u2705 id:{target_id} uchun bonus limit +{amount} qo\'shildi. Yangi {peri..."},
+    {"n": 29, "key": "me01027b3", "kind": "message", "preview": "Butun son kiriting. Bekor qilindi."},
+    {"n": 30, "key": "m8b0fb938", "kind": "message", "preview": "\U0001f4e8 Xabaringiz superadminga tasdiq uchun yuborildi."},
+    {"n": 31, "key": "m91979466", "kind": "message", "preview": "\u2709\ufe0f <b>{sender_label}</b> boshqa adminlarga xabar yubormoqchi:\n\n{msg..."},
+    {"n": 32, "key": "b9c5263c9", "kind": "button", "preview": "\u274c Rad etish"},
+    {"n": 33, "key": "b38662198", "kind": "button", "preview": "\u2705 Ruxsat berish"},
+    {"n": 34, "key": "mba322c07", "kind": "message", "preview": "\u2705 Xabaringiz {sent} ta adminga yuborildi."},
+    {"n": 35, "key": "mc54503fd", "kind": "message", "preview": "\u2709\ufe0f <b>Superadmindan xabar:</b>\n\n{msg_text}"},
+    {"n": 36, "key": "m2ebf9ed5", "kind": "message", "preview": "Bo\'sh xabar yuborib bo\'lmaydi. Bekor qilindi."},
+    {"n": 37, "key": "m2eeeff3c", "kind": "message", "preview": "\u274c Yuborib bo\'lmadi (foydalanuvchi botni bloklagan bo\'lishi mumkin)."},
+    {"n": 38, "key": "m35d7ebd9", "kind": "message", "preview": "\u2705 Yuborildi."},
+    {"n": 39, "key": "mb7d9bf2b", "kind": "message", "preview": "\u2705 Endi siz {seconds} soniya ichida o\'zingiz javob yozmasangiz, avto..."},
+    {"n": 40, "key": "m7547ba2a", "kind": "message", "preview": "\u2705 Kechikish o\'chirildi \u2014 javoblar darhol ketadi."},
+    {"n": 41, "key": "m69f82c40", "kind": "message", "preview": "0 yoki musbat son bo\'lishi kerak."},
+    {"n": 42, "key": "mbe72fdec", "kind": "message", "preview": "Butun son kiriting (soniya), masalan: 60"},
+    {"n": 43, "key": "mbe2dfffc", "kind": "message", "preview": "\u2705 Bot imzosi o\'rnatildi (ID: {custom_emoji_id}). Endi shu bilan yub..."},
+    {"n": 44, "key": "mf2df93fa", "kind": "message", "preview": "ID topilmadi. Premium emojining o\'zini yuboring yoki uning raqamli ..."},
+    {"n": 45, "key": "m9a6c4f85", "kind": "message", "preview": "\u2705 {label} endi premium emoji: ID {custom_emoji_id}"},
+    {"n": 46, "key": "m6c32a4dd", "kind": "message", "preview": "\u274c {result}"},
+    {"n": 47, "key": "m63613a88", "kind": "message", "preview": "\u2705 Kalit qo\'shildi.{note}"},
+    {"n": 48, "key": "m64c480ef", "kind": "message", "preview": "Bo\'sh bo\'lishi mumkin emas. Bekor qilindi."},
+    {"n": 49, "key": "m066dff15", "kind": "message", "preview": "\xab{trigger}\xbb kelganda qanday javob yozilsin?"},
+    {"n": 50, "key": "be9c0a4e4", "kind": "button", "preview": "\u2b05\ufe0f Orqaga"},
+    {"n": 51, "key": "b9f96fedb", "kind": "button", "preview": "\u2b05\ufe0f Boshqaruv paneli"},
+    {"n": 52, "key": "b919f4cb6", "kind": "button", "preview": "\U0001f6ab O\'chirish"},
+    {"n": 53, "key": "b3bcc1ac1", "kind": "button", "preview": "\u2728 O\'rnatish/almashtirish"},
+    {"n": 54, "key": "be4a68ce9", "kind": "button", "preview": "\u2728 Premium emoji (ID orqali)"},
+    {"n": 55, "key": "bfc9115ce", "kind": "button", "preview": "\u2b05\ufe0f Superadmin panel"},
+    {"n": 56, "key": "bbf16b40c", "kind": "button", "preview": "\u2795 Kanal qo\'shish"},
+    {"n": 57, "key": "b94e5cc42", "kind": "button", "preview": "\u274c {c[\'title\']}"},
+    {"n": 58, "key": "b5b01e9bf", "kind": "button", "preview": "\u2b05\ufe0f Panel"},
+    {"n": 59, "key": "bae13f90c", "kind": "button", "preview": "\u2795 Admin qo\'shish"},
+    {"n": 60, "key": "ba5ff21a9", "kind": "button", "preview": "\u274c id:{a}"},
+    {"n": 61, "key": "b152a672c", "kind": "button", "preview": "Kalit +1"},
+    {"n": 62, "key": "b676c46f9", "kind": "button", "preview": "Kalit \u22121"},
+    {"n": 63, "key": "bc1189e15", "kind": "button", "preview": "Chegara +1"},
+    {"n": 64, "key": "b3161c2e3", "kind": "button", "preview": "Chegara \u22121"},
+    {"n": 65, "key": "b61f05eae", "kind": "button", "preview": "Bazaviy +1"},
+    {"n": 66, "key": "b08162977", "kind": "button", "preview": "Bazaviy \u22121"},
+    {"n": 67, "key": "m87e22d63", "kind": "message", "preview": "\u274c Xabaringiz superadmin tomonidan rad etildi."},
+    {"n": 68, "key": "m93d04d03", "kind": "message", "preview": "\u2705 Xabaringiz superadmin tomonidan tasdiqlandi va {sent} ta adminga ..."},
+    {"n": 69, "key": "m90b944ef", "kind": "message", "preview": "\u2709\ufe0f <b>{pending[\'from_label\']}</b> dan xabar:\n\n{pending[\'text\']}"},
+    {"n": 70, "key": "bb589faa0", "kind": "button", "preview": "\u2b05\ufe0f Admin panel"},
+    {"n": 71, "key": "bd71ea228", "kind": "button", "preview": "\u27a1\ufe0f"},
+    {"n": 72, "key": "bcd46a3e3", "kind": "button", "preview": "\u2b05\ufe0f"},
+    {"n": 73, "key": "bf7c0ed06", "kind": "button", "preview": "\U0001f4e2 {info.get(\'title\', cid)}"},
+    {"n": 74, "key": "b252ed856", "kind": "button", "preview": "\U0001f468\u200d\U0001f469\u200d\U0001f467 {info.get(\'title\', gid)}"},
+    {"n": 75, "key": "c6eeeda11", "kind": "caption", "preview": "\U0001f4e4 Foydalanuvchilar eksporti (CSV)."},
+    {"n": 76, "key": "b59c34c96", "kind": "button", "preview": "{i}. {user_label(uid)}"},
+    {"n": 77, "key": "mfeb46424", "kind": "message", "preview": "Taklif havolasini yaratib bo\'lmadi \u2014 bot shu chatda admin ekanini t..."},
+    {"n": 78, "key": "m18725027", "kind": "message", "preview": "\U0001f517 Eslatma: Telegram Bot API orqali botning sizni majburan a\'zo qili..."},
+    {"n": 79, "key": "b15ab527e", "kind": "button", "preview": "\u2b05\ufe0f Kanallar"},
+    {"n": 80, "key": "be87a5a3a", "kind": "button", "preview": "\U0001f517 Meni taklif qil (invite link)"},
+    {"n": 81, "key": "bdb98e9c3", "kind": "button", "preview": "\u2b05\ufe0f Guruhlar"},
+    {"n": 82, "key": "b32669fe9", "kind": "button", "preview": "\u2b05\ufe0f Foydalanuvchilar"},
+    {"n": 83, "key": "b14464cfa", "kind": "button", "preview": "\U0001f4ac Unga yozish"},
+    {"n": 84, "key": "b454b1f68", "kind": "button", "preview": "\u2795 Limit berish"},
+    {"n": 85, "key": "b56e75613", "kind": "button", "preview": "\U0001f4e6 Pack ({counts.get(\'pack\', 0)})"},
+    {"n": 86, "key": "bad705d3d", "kind": "button", "preview": "\U0001f39e GIF ({counts.get(\'gif\', 0)})"},
+    {"n": 87, "key": "b567bab70", "kind": "button", "preview": "\U0001f600 Emoji ({counts.get(\'emoji\', 0)})"},
+    {"n": 88, "key": "b5295f72b", "kind": "button", "preview": "\U0001f5bc Sticker ({counts.get(\'sticker\', 0)})"},
+    {"n": 89, "key": "bf81f97b5", "kind": "button", "preview": "\U0001f4cb Matn - to\'liq"},
+    {"n": 90, "key": "b21300db4", "kind": "button", "preview": "\U0001f5bc Avval stiker, keyin ID\'si"},
+    {"n": 91, "key": "b834c0729", "kind": "button", "preview": "\U0001f4c4 Txt fayl qilib jo\'natish"},
+    {"n": 92, "key": "b760488f3", "kind": "button", "preview": "\U0001f4dd Matn qilib chatga jo\'natish"},
+    {"n": 93, "key": "b88dedf35", "kind": "button", "preview": "\u2b05\ufe0f Reyting"},
+    {"n": 94, "key": "ba5ddc162", "kind": "button", "preview": "\u2b05\ufe0f Bosh menyu"},
+    {"n": 95, "key": "bd31f81a3", "kind": "button", "preview": "{i}. {user_label(uid)} \u2014 {refs} ta referal"},
+    {"n": 96, "key": "b5423ca44", "kind": "button", "preview": "\u2b05\ufe0f Kalitlarim"},
+    {"n": 97, "key": "bb9b933b9", "kind": "button", "preview": "\U0001f5d1 O\'chirish"},
+    {"n": 98, "key": "b27a4b97f", "kind": "button", "preview": "\U0001f310 Har qanday xabarga (default javob)"},
+    {"n": 99, "key": "b4543c5f2", "kind": "button", "preview": "\U0001f3af Aniq so\'z/ibora bo\'yicha"},
+    {"n": 100, "key": "ba196826a", "kind": "button", "preview": "\u23f1 Javob kechikishini sozlash (offline)"},
+    {"n": 101, "key": "bc59d32a2", "kind": "button", "preview": "\u2b50 Premium olish (cheksiz)"},
+    {"n": 102, "key": "b0cea0117", "kind": "button", "preview": "\u2795 Yangi kalit qo\'shish"},
+    {"n": 103, "key": "bbb72fe44", "kind": "button", "preview": "\U0001f5d1"},
+    {"n": 104, "key": "b726d87a2", "kind": "button", "preview": "\u2b50 100 Stars uchun sotib olish"},
+    {"n": 105, "key": "b8ad57f28", "kind": "button", "preview": "\U0001f4ac Foydalanuvchiga yozish"},
+    {"n": 106, "key": "b9f0f8ac0", "kind": "button", "preview": "\u270d\ufe0f Adminlarga xabar"},
+    {"n": 107, "key": "bdc831b88", "kind": "button", "preview": "\U0001f4e3 Broadcast"},
+    {"n": 108, "key": "b091eaf7f", "kind": "button", "preview": "\U0001f916 Bot admin joylar"},
+    {"n": 109, "key": "ba354ef5b", "kind": "button", "preview": "\U0001f4e4 Eksport (CSV)"},
+    {"n": 110, "key": "bcbd1d6da", "kind": "button", "preview": "\U0001f3c6 Referal reyting"},
+    {"n": 111, "key": "bc08459b5", "kind": "button", "preview": "\u2728 Bot imzosi (premium emoji)"},
+    {"n": 112, "key": "be8297373", "kind": "button", "preview": "\u26a1 Reaksiya emoji"},
+    {"n": 113, "key": "b89e7c902", "kind": "button", "preview": "\U0001f6e1 Adminlar"},
+    {"n": 114, "key": "b946559cc", "kind": "button", "preview": "\u2699\ufe0f Limit sozlamalari"},
+    {"n": 115, "key": "be45e0721", "kind": "button", "preview": "\U0001f381 Bonus kanallar"},
+    {"n": 116, "key": "b4f6111d5", "kind": "button", "preview": "\U0001f512 Majburiy kanallar"},
+    {"n": 117, "key": "b2c5ffb7a", "kind": "button", "preview": "\U0001f4e2 Kanallar"},
+    {"n": 118, "key": "b0fb982b7", "kind": "button", "preview": "\U0001f468\u200d\U0001f469\u200d\U0001f467 Guruhlar"},
+    {"n": 119, "key": "bc10128d4", "kind": "button", "preview": "\U0001f465 Foydalanuvchilar"},
+    {"n": 120, "key": "b2419753d", "kind": "button", "preview": "\U0001f511 Avto-javob (Business)"},
+    {"n": 121, "key": "b71db05db", "kind": "button", "preview": "\U0001f3c6 Reyting"},
+    {"n": 122, "key": "b7f830788", "kind": "button", "preview": "\u2753 Yordam"},
+    {"n": 123, "key": "bef2977c4", "kind": "button", "preview": "\u2b50 Premium"},
+    {"n": 124, "key": "b02fb8090", "kind": "button", "preview": "\U0001f381 Bonus"},
+    {"n": 125, "key": "bb48040e8", "kind": "button", "preview": "\U0001f4ca Limitim"},
+    {"n": 126, "key": "b2fe74690", "kind": "button", "preview": "\U0001f517 Referal"},
+    {"n": 127, "key": "bafbc3e7e", "kind": "button", "preview": "\U0001f4e6 Pack yuklab olish"},
+    {"n": 128, "key": "cc09ad5b6", "kind": "caption", "preview": "{requester_info} yuklagan GIF"},
+    {"n": 129, "key": "cc16f75b4", "kind": "caption", "preview": "Faylni ochish uchun ZIP\'ni yeching."},
+    {"n": 130, "key": "md07b6802", "kind": "message", "preview": "Faylni olishda xato yuz berdi."},
+    {"n": 131, "key": "m723cc1c8", "kind": "message", "preview": "Bu xabarda GIF/animatsiya topilmadi."},
+    {"n": 132, "key": "c4726f6ec", "kind": "caption", "preview": "{pending[\'requester_info\']} yuklagan sticker"},
+    {"n": 133, "key": "c7c1e2f8f", "kind": "caption", "preview": "{requester_info} yuklagan sticker"},
+    {"n": 134, "key": "md7cb107b", "kind": "message", "preview": "Bu xabarda sticker/custom emoji topilmadi."},
+    {"n": 135, "key": "cf6890d75", "kind": "caption", "preview": "{pending[\'requester_info\']} \u2014 webm GIF"},
+    {"n": 136, "key": "c43f9af6c", "kind": "caption", "preview": "\U0001f39e WebM tayyor."},
+    {"n": 137, "key": "m5de9a7ba", "kind": "message", "preview": "GIF\'ni webm\'ga o\'girishda xato yuz berdi. Qaytadan urinib ko\'ring."},
+    {"n": 138, "key": "mb55c4ee6", "kind": "message", "preview": "Pack topilmadi. Nomini tekshiring."},
+    {"n": 139, "key": "m82174114", "kind": "message", "preview": "\U0001f4e6 {pack_name} \u2014 {len(stickers)} ta element, birma-bir yuboryapman..."},
+    {"n": 140, "key": "mfc20648e", "kind": "message", "preview": "Bu pack bo\'sh ko\'rinadi."},
+    {"n": 141, "key": "m1949e217", "kind": "message", "preview": "{placeholder} (jonli ko\'rinishni yubora olmadim \u2014 bot egasida Teleg..."},
+    {"n": 142, "key": "mb78187fa", "kind": "message", "preview": "\u26a0\ufe0f Jonli emoji ko\'rsatib bo\'lmadi \u2014 bot egasida Telegram Premium bo..."},
+    {"n": 143, "key": "c8c76f66b", "kind": "caption", "preview": "{pack_name} \u2014 barcha ID\'lar"},
+    {"n": 144, "key": "cd6ab52a7", "kind": "caption", "preview": "{requester_info} so\'ragan pack: {pack_name} ({result} ta fayl)"},
+    {"n": 145, "key": "c1f84b9b9", "kind": "caption", "preview": "{result} ta fayl topildi."},
+    {"n": 146, "key": "c2f0992e5", "kind": "caption", "preview": "{requester_info} so\'ragan pack: {pack_name} (kesh)"},
+    {"n": 147, "key": "cfc37bec3", "kind": "caption", "preview": "{cached[\'sticker_count\']} ta fayl topildi. (kesh)"},
+    {"n": 148, "key": "m3b80c09e", "kind": "message", "preview": "\'{pack_name}\' qidirilmoqda, kuting..."},
+    {"n": 149, "key": "c5f48678c", "kind": "caption", "preview": "{requester_info} \u2014 {filename}"},
+    {"n": 150, "key": "mdb26262a", "kind": "message", "preview": "Bu pack\'da {len(stickers)} ta element bor. 1 dan {len(stickers)} ga..."},
+    {"n": 151, "key": "mf6fef6fa", "kind": "message", "preview": "Pack topilmadi. Nomini/havolani tekshiring."},
+    {"n": 152, "key": "m4aad1f7a", "kind": "message", "preview": "\U0001f389 Sizning referal havolangiz orqali yangi foydalanuvchi qo\'shildi!\n..."},
+    {"n": 153, "key": "bf4520fe4", "kind": "button", "preview": "Tekshirish"},
+    {"n": 154, "key": "m89eab3cf", "kind": "message", "preview": "\U0001f512 Botdan foydalanishdan oldin quyidagi kanal(lar)ga a\'zo bo\'ling, s..."},
+    {"n": 155, "key": "b813422c1", "kind": "button", "preview": "\u2705 A\'zo bo\'ldim, tekshirish"},
+]
+
 app = Flask(__name__)
 
 BOT_ID = None
@@ -140,18 +303,31 @@ def tg_call(method, **params):
 
 
 def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_markup=None,
-                  business_connection_id=None, entities=None, add_signature=True):
+                  business_connection_id=None, entities=None, add_signature=True,
+                  decoration_key=None, _retry_plain=False):
     send_text, send_entities = text, entities
-    sig_id = get_signature_emoji() if (add_signature and not entities) else None
+    used_extra = False
+
+    if not entities and not _retry_plain:
+        key = decoration_key or _auto_text_key(text)
+        dtext, dentities = decorate_text(key, text)
+        if dentities:
+            send_text, send_entities = dtext, dentities
+            used_extra = True
+
+    sig_id = None
+    if not _retry_plain:
+        sig_id = get_signature_emoji() if (add_signature and not send_entities) else None
     if sig_id:
         placeholder = get_signature_placeholder()
         if parse_mode_html:
-            send_text = f'{text} <tg-emoji emoji-id="{html.escape(sig_id, quote=True)}">{html.escape(placeholder, quote=False)}</tg-emoji>'
+            send_text = f'{send_text} <tg-emoji emoji-id="{html.escape(sig_id, quote=True)}">{html.escape(placeholder, quote=False)}</tg-emoji>'
         else:
-            base_len = utf16_len(text)
-            send_text = f"{text} {placeholder}"
+            base_len = utf16_len(send_text)
+            send_text = f"{send_text} {placeholder}"
             send_entities = [{"type": "custom_emoji", "offset": base_len + 1,
                                "length": utf16_len(placeholder), "custom_emoji_id": sig_id}]
+        used_extra = True
 
     params = {"chat_id": chat_id, "text": send_text}
     if reply_to:
@@ -161,32 +337,48 @@ def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_mark
     elif parse_mode_html:
         params["parse_mode"] = "HTML"
     if reply_markup:
-        params["reply_markup"] = reply_markup
+        params["reply_markup"] = reply_markup if _retry_plain else apply_button_icons(reply_markup)
     if business_connection_id:
         params["business_connection_id"] = business_connection_id
     result = tg_call("sendMessage", **params)
 
-    if sig_id and not (result and result.get("ok")):
-        # Imzo (premium emoji) rad etildi — original xabarni imzosiz, o'zgarishsiz qayta yuboramiz
+    if used_extra and not (result and result.get("ok")):
         return send_message(chat_id, text, reply_to=reply_to, parse_mode_html=parse_mode_html,
                              reply_markup=reply_markup, business_connection_id=business_connection_id,
-                             entities=entities, add_signature=False)
+                             entities=entities, add_signature=False, _retry_plain=True)
     return result
 
 
-def edit_message_text(chat_id, message_id, text, parse_mode_html=False, reply_markup=None):
-    params = {"chat_id": chat_id, "message_id": message_id, "text": text}
-    if parse_mode_html:
+def edit_message_text(chat_id, message_id, text, parse_mode_html=False, reply_markup=None,
+                       decoration_key=None, _retry_plain=False):
+    send_text, send_entities = text, None
+    if not _retry_plain:
+        key = decoration_key or _auto_text_key(text)
+        dtext, dentities = decorate_text(key, text)
+        if dentities:
+            send_text, send_entities = dtext, dentities
+
+    params = {"chat_id": chat_id, "message_id": message_id, "text": send_text}
+    if send_entities:
+        params["entities"] = send_entities
+    elif parse_mode_html:
         params["parse_mode"] = "HTML"
     if reply_markup:
-        params["reply_markup"] = reply_markup
-    return tg_call("editMessageText", **params)
+        params["reply_markup"] = reply_markup if _retry_plain else apply_button_icons(reply_markup)
+    result = tg_call("editMessageText", **params)
+
+    if send_entities and not (result and result.get("ok")):
+        return edit_message_text(chat_id, message_id, text, parse_mode_html=parse_mode_html,
+                                  reply_markup=reply_markup, _retry_plain=True)
+    return result
 
 
-def safe_edit_or_send(chat_id, message_id, text, parse_mode_html=False, reply_markup=None):
-    result = edit_message_text(chat_id, message_id, text, parse_mode_html=parse_mode_html, reply_markup=reply_markup)
+def safe_edit_or_send(chat_id, message_id, text, parse_mode_html=False, reply_markup=None, decoration_key=None):
+    result = edit_message_text(chat_id, message_id, text, parse_mode_html=parse_mode_html,
+                                reply_markup=reply_markup, decoration_key=decoration_key)
     if not result.get("ok"):
-        send_message(chat_id, text, parse_mode_html=parse_mode_html, reply_markup=reply_markup)
+        send_message(chat_id, text, parse_mode_html=parse_mode_html, reply_markup=reply_markup,
+                      decoration_key=decoration_key)
 
 
 def answer_callback_query(callback_query_id, text=None, show_alert=False):
@@ -197,11 +389,20 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
     return tg_call("answerCallbackQuery", **params)
 
 
-def send_document_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None):
+def send_document_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None,
+                         caption_entities=None, decoration_key=None):
     files = {"document": (filename, file_bytes)}
     payload = {"chat_id": chat_id}
     if caption:
-        payload["caption"] = caption
+        send_caption, send_ents = caption, caption_entities
+        if not caption_entities:
+            key = decoration_key or _auto_text_key(caption)
+            dtext, dents = decorate_text(key, caption)
+            if dents:
+                send_caption, send_ents = dtext, dents
+        payload["caption"] = send_caption
+        if send_ents:
+            payload["caption_entities"] = json.dumps(send_ents)
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
     resp = requests.post(f"{API_BASE}/sendDocument", data=payload, files=files, timeout=60)
@@ -215,13 +416,22 @@ def send_document_bytes(chat_id, filename, file_bytes, caption=None, business_co
     return data
 
 
-def send_video_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None):
+def send_video_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None,
+                      caption_entities=None, decoration_key=None):
     """.webm formatdagi custom emoji/stikerlarni video sifatida (fayl emas) yuboradi,
     shunda Telegram uni ichkarida ijro etadi."""
     files = {"video": (filename, file_bytes)}
     payload = {"chat_id": chat_id}
     if caption:
-        payload["caption"] = caption
+        send_caption, send_ents = caption, caption_entities
+        if not caption_entities:
+            key = decoration_key or _auto_text_key(caption)
+            dtext, dents = decorate_text(key, caption)
+            if dents:
+                send_caption, send_ents = dtext, dents
+        payload["caption"] = send_caption
+        if send_ents:
+            payload["caption_entities"] = json.dumps(send_ents)
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
     resp = requests.post(f"{API_BASE}/sendVideo", data=payload, files=files, timeout=60)
@@ -235,14 +445,23 @@ def send_video_bytes(chat_id, filename, file_bytes, caption=None, business_conne
     return data
 
 
-def send_animation_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None):
+def send_animation_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None,
+                          caption_entities=None, decoration_key=None):
     """.webm formatdagi custom emoji/stikerlarni animatsiya sifatida (GIF kabi) yuboradi —
     bu qisqa, tovushsiz, halqali cliplar uchun sendVideo'dan ko'ra to'g'ri usul,
     Telegram uni ichkarida halqali ijro etadi, fayl sifatida ko'rsatmaydi."""
     files = {"animation": (filename, file_bytes)}
     payload = {"chat_id": chat_id}
     if caption:
-        payload["caption"] = caption
+        send_caption, send_ents = caption, caption_entities
+        if not caption_entities:
+            key = decoration_key or _auto_text_key(caption)
+            dtext, dents = decorate_text(key, caption)
+            if dents:
+                send_caption, send_ents = dtext, dents
+        payload["caption"] = send_caption
+        if send_ents:
+            payload["caption_entities"] = json.dumps(send_ents)
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
     resp = requests.post(f"{API_BASE}/sendAnimation", data=payload, files=files, timeout=60)
@@ -558,6 +777,64 @@ def clear_signature_emoji():
     with _state_lock:
         STATE.setdefault("config", {}).pop("signature_emoji", None)
         save_state_locked()
+
+
+# ================= Har bir matn/tugma uchun alohida premium emoji =================
+def _auto_text_key(text):
+    return "m" + hashlib.sha256(("message::" + text).encode("utf-8")).hexdigest()[:8]
+
+
+def _auto_button_key(text):
+    return "b" + hashlib.sha256(("button::" + text).encode("utf-8")).hexdigest()[:8]
+
+
+def get_text_decoration(key):
+    return STATE.get("text_decorations", {}).get(key)
+
+
+def set_text_decoration(key, custom_emoji_id, position="end", placeholder="✨"):
+    with _state_lock:
+        STATE.setdefault("text_decorations", {})[key] = {
+            "custom_emoji_id": custom_emoji_id, "position": position, "placeholder": placeholder,
+        }
+        save_state_locked()
+
+
+def clear_text_decoration(key):
+    with _state_lock:
+        removed = STATE.setdefault("text_decorations", {}).pop(key, None) is not None
+        save_state_locked()
+        return removed
+
+
+def decorate_text(key, text):
+    deco = get_text_decoration(key)
+    if not deco or not deco.get("custom_emoji_id"):
+        return text, None
+    placeholder = deco.get("placeholder") or "✨"
+    cid = deco["custom_emoji_id"]
+    if deco.get("position") == "start":
+        new_text = f"{placeholder} {text}"
+        offset = 0
+    else:
+        new_text = f"{text} {placeholder}"
+        offset = utf16_len(text) + 1
+    entities = [{"type": "custom_emoji", "offset": offset, "length": utf16_len(placeholder), "custom_emoji_id": cid}]
+    return new_text, entities
+
+
+def apply_button_icons(reply_markup):
+    if not reply_markup or not reply_markup.get("inline_keyboard"):
+        return reply_markup
+    for row in reply_markup["inline_keyboard"]:
+        for btn in row:
+            if "icon_custom_emoji_id" in btn or not btn.get("text"):
+                continue
+            key = btn.pop("_deco_key", None) or _auto_button_key(btn["text"])
+            deco = get_text_decoration(key)
+            if deco and deco.get("custom_emoji_id"):
+                btn["icon_custom_emoji_id"] = deco["custom_emoji_id"]
+    return reply_markup
 
 
 def get_reaction_config_for(kind):
@@ -1018,7 +1295,7 @@ def register_referral(new_user_id, referrer_id):
     send_message(
         referrer_id,
         f"🎉 Sizning referal havolangiz orqali yangi foydalanuvchi qo'shildi!\n"
-        f"Yangi {period} limitingiz: {limit} ta.",
+        f"Yangi {period} limitingiz: {limit} ta.", decoration_key="m4aad1f7a",
     )
 
 
@@ -1128,7 +1405,7 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
         return
     stickers = sticker_set.get("stickers", [])
     if index < 1 or index > len(stickers):
-        send_message(chat_id, f"Bu pack'da {len(stickers)} ta element bor. 1 dan {len(stickers)} gacha raqam kiriting.",
+        send_message(chat_id, f"Bu pack'da {len(stickers)} ta element bor. 1 dan {len(stickers)} gacha raqam kiriting.", decoration_key="mdb26262a",
                      reply_to=reply_to, business_connection_id=business_connection_id)
         return
     sticker = stickers[index - 1]
@@ -1145,9 +1422,9 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
     send_document_bytes(chat_id, filename, content, caption=caption, business_connection_id=business_connection_id)
     notify_admin(f"✅ .tgs orqali yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}")
+        send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}", decoration_key="c5f48678c")
     if CACHE_GROUP_ID:
-        send_document_bytes(CACHE_GROUP_ID, filename, content, caption=f"{requester_info} — {filename}")
+        send_document_bytes(CACHE_GROUP_ID, filename, content, caption=f"{requester_info} — {filename}", decoration_key="c5f48678c")
 
 
 def get_custom_emoji_set_name(custom_emoji_id):
@@ -1208,7 +1485,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
         send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
         return
 
-    send_message(chat_id, f"'{pack_name}' qidirilmoqda, kuting...", reply_to=reply_to,
+    send_message(chat_id, f"'{pack_name}' qidirilmoqda, kuting...", decoration_key="m3b80c09e", reply_to=reply_to,
                  business_connection_id=business_connection_id)
 
     sticker_set = get_sticker_set(pack_name)
@@ -1225,7 +1502,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
         cached = cache.get(pack_name.lower())
         if cached and cached.get("content_hash") == current_hash:
             result = send_document_by_file_id(
-                chat_id, cached["file_id"], caption=f"{cached['sticker_count']} ta fayl topildi. (kesh)",
+                chat_id, cached["file_id"], caption=f"{cached['sticker_count']} ta fayl topildi. (kesh)", decoration_key="cfc37bec3",
                 business_connection_id=business_connection_id,
             )
             if result.get("ok"):
@@ -1234,7 +1511,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
                 if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
                     send_document_by_file_id(
                         SUPERADMIN_ID, cached["file_id"],
-                        caption=f"{requester_info} so'ragan pack: {pack_name} (kesh)",
+                        caption=f"{requester_info} so'ragan pack: {pack_name} (kesh)", decoration_key="c2f0992e5",
                     )
                 return
         elif cached:
@@ -1250,7 +1527,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
 
     register_request(requester_id, kind="pack", detail=pack_name)
     zip_bytes = buf.getvalue()
-    send_result = send_document_bytes(chat_id, f"{pack_name}.zip", zip_bytes, caption=f"{result} ta fayl topildi.",
+    send_result = send_document_bytes(chat_id, f"{pack_name}.zip", zip_bytes, caption=f"{result} ta fayl topildi.", decoration_key="c1f84b9b9",
                                        business_connection_id=business_connection_id)
 
     if CACHE_GROUP_ID:
@@ -1271,12 +1548,12 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
         if send_result.get("ok"):
             send_document_by_file_id(
                 SUPERADMIN_ID, send_result["result"]["document"]["file_id"],
-                caption=f"{requester_info} so'ragan pack: {pack_name} ({result} ta fayl)",
+                caption=f"{requester_info} so'ragan pack: {pack_name} ({result} ta fayl)", decoration_key="cd6ab52a7",
             )
         else:
             send_document_bytes(
                 SUPERADMIN_ID, f"{pack_name}.zip", zip_bytes,
-                caption=f"{requester_info} so'ragan pack: {pack_name} ({result} ta fayl)",
+                caption=f"{requester_info} so'ragan pack: {pack_name} ({result} ta fayl)", decoration_key="cd6ab52a7",
             )
 
 
@@ -1387,7 +1664,7 @@ def send_pack_ids_as_txt_file(chat_id, pack_name, sticker_set, business_connecti
     content = build_pack_id_txt_content(sticker_set, pack_name)
     send_document_bytes(
         chat_id, f"{pack_name}_id.txt", content.encode("utf-8"),
-        caption=f"{pack_name} — barcha ID'lar", business_connection_id=business_connection_id,
+        caption=f"{pack_name} — barcha ID'lar", decoration_key="c8c76f66b", business_connection_id=business_connection_id,
     )
 
 
@@ -1460,7 +1737,7 @@ def send_custom_emoji_preview(chat_id, custom_emoji_id, placeholder_char, busine
     if not (result and result.get("ok")):
         send_message(
             chat_id,
-            f"{placeholder} (jonli ko'rinishni yubora olmadim — bot egasida Telegram Premium kerak)",
+            f"{placeholder} (jonli ko'rinishni yubora olmadim — bot egasida Telegram Premium kerak)", decoration_key="m1949e217",
             business_connection_id=business_connection_id,
         )
     return result
@@ -1477,7 +1754,7 @@ def send_pack_ids_sequential(chat_id, pack_name, sticker_set, business_connectio
         send_message(chat_id, "Bu pack bo'sh ko'rinadi.", business_connection_id=business_connection_id)
         return
     send_message(
-        chat_id, f"📦 {pack_name} — {len(stickers)} ta element, birma-bir yuboryapman...",
+        chat_id, f"📦 {pack_name} — {len(stickers)} ta element, birma-bir yuboryapman...", decoration_key="m82174114",
         business_connection_id=business_connection_id,
     )
     for i, sticker in enumerate(stickers, start=1):
@@ -1598,9 +1875,9 @@ def _handle_gif_webm_request_sync(chat_id, pending, requester_id):
     send_animation_bytes(chat_id, "gif.webm", webm_bytes, caption="🎞 WebM tayyor.")
     notify_admin(f"✅ GIF webm'ga o'girildi\nKimdan: {pending['requester_info']}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_animation_bytes(SUPERADMIN_ID, "gif.webm", webm_bytes, caption=f"{pending['requester_info']} — webm GIF")
+        send_animation_bytes(SUPERADMIN_ID, "gif.webm", webm_bytes, caption=f"{pending['requester_info']} — webm GIF", decoration_key="cf6890d75")
     if CACHE_GROUP_ID:
-        send_animation_bytes(CACHE_GROUP_ID, "gif.webm", webm_bytes, caption=f"{pending['requester_info']} — webm GIF")
+        send_animation_bytes(CACHE_GROUP_ID, "gif.webm", webm_bytes, caption=f"{pending['requester_info']} — webm GIF", decoration_key="cf6890d75")
 
 
 def handle_gif_id_request(chat_id, pending, requester_id):
@@ -1653,9 +1930,9 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
                         business_connection_id=business_connection_id)
     notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker")
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker", decoration_key="c7c1e2f8f")
     if CACHE_GROUP_ID:
-        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker")
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan sticker", decoration_key="c7c1e2f8f")
 
 
 def handle_single_sticker_request_from_pending(chat_id, pending, requester_id):
@@ -1683,9 +1960,9 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
     send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
     notify_admin(f"✅ Bitta sticker yuklandi\nKimdan: {pending['requester_info']}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker", decoration_key="c4726f6ec")
     if CACHE_GROUP_ID:
-        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker")
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{pending['requester_info']} yuklagan sticker", decoration_key="c4726f6ec")
 
 
 def handle_animation_request(chat_id, msg, requester_info, requester_id, reply_to=None, business_connection_id=None):
@@ -1720,9 +1997,9 @@ def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, r
                         business_connection_id=business_connection_id)
     notify_admin(f"✅ GIF yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
-        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF")
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF", decoration_key="cc09ad5b6")
     if CACHE_GROUP_ID:
-        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF")
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF", decoration_key="cc09ad5b6")
 
 
 def requester_label(from_user):
@@ -2354,7 +2631,7 @@ def handle_callback_query(cq):
                 user_id,
                 "🔗 Eslatma: Telegram Bot API orqali botning sizni majburan a'zo qilishi "
                 "imkonsiz (bu faqat MTProto user-klientda mavjud). Quyidagi havola orqali "
-                f"o'zingiz qo'shilishingiz mumkin:\n{link}",
+                f"o'zingiz qo'shilishingiz mumkin:\n{link}", decoration_key="m18725027",
             )
         else:
             send_message(user_id, "Taklif havolasini yaratib bo'lmadi — bot shu chatda admin ekanini tekshiring.")
@@ -2466,12 +2743,12 @@ def handle_callback_query(cq):
                 targets = [a for a in STATE["admins"] if a != pending["from_id"]]
             sent = 0
             for aid in targets:
-                r = send_message(aid, f"✉️ <b>{pending['from_label']}</b> dan xabar:\n\n{pending['text']}",
+                r = send_message(aid, f"✉️ <b>{pending['from_label']}</b> dan xabar:\n\n{pending['text']}", decoration_key="m90b944ef",
                                   parse_mode_html=True)
                 if r.get("ok"):
                     sent += 1
             edit_message_text(chat_id, message_id, f"✅ Tasdiqlandi. Xabar {sent} ta adminga yuborildi.")
-            send_message(pending["from_id"], f"✅ Xabaringiz superadmin tomonidan tasdiqlandi va {sent} ta adminga yuborildi.")
+            send_message(pending["from_id"], f"✅ Xabaringiz superadmin tomonidan tasdiqlandi va {sent} ta adminga yuborildi.", decoration_key="m93d04d03")
         else:
             edit_message_text(chat_id, message_id, "❌ Rad etildi.")
             send_message(pending["from_id"], "❌ Xabaringiz superadmin tomonidan rad etildi.")
@@ -2841,7 +3118,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             send_message(chat_id, "Bo'sh bo'lishi mumkin emas. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
             return True
         set_pending_input(user_id, "kw_response", {"trigger": trigger, "type": "exact"})
-        send_message(chat_id, f"«{trigger}» kelganda qanday javob yozilsin?", reply_markup=back_to_menu_keyboard())
+        send_message(chat_id, f"«{trigger}» kelganda qanday javob yozilsin?", decoration_key="m066dff15", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "kw_response":
@@ -2854,9 +3131,9 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         ok, result = add_keyword(user_id, data.get("trigger", "*"), data.get("type", "exact"), response, entities)
         if ok:
             note = " (premium emoji/formatlash saqlandi ✨)" if entities else ""
-            send_message(chat_id, f"✅ Kalit qo'shildi.{note}", reply_markup=back_to_menu_keyboard())
+            send_message(chat_id, f"✅ Kalit qo'shildi.{note}", decoration_key="m63613a88", reply_markup=back_to_menu_keyboard())
         else:
-            send_message(chat_id, f"❌ {result}", reply_markup=back_to_menu_keyboard())
+            send_message(chat_id, f"❌ {result}", decoration_key="m6c32a4dd", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "reaction_custom":
@@ -2870,7 +3147,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             return True
         set_reaction_custom_emoji_for(kind, custom_emoji_id)
         _, label = REACTION_KIND_CONFIG[kind]
-        send_message(chat_id, f"✅ {label} endi premium emoji: ID {custom_emoji_id}",
+        send_message(chat_id, f"✅ {label} endi premium emoji: ID {custom_emoji_id}", decoration_key="m9a6c4f85",
                      reply_markup=back_to_menu_keyboard())
         return True
 
@@ -2891,7 +3168,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                 break
         set_signature_emoji(custom_emoji_id, placeholder or "✨")
         send_message(chat_id, f"✅ Bot imzosi o'rnatildi (ID: {custom_emoji_id}). "
-                              f"Endi shu bilan yuboraman:", reply_markup=back_to_menu_keyboard())
+                              f"Endi shu bilan yuboraman:", decoration_key="mbe2dfffc", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "away_delay":
@@ -2910,7 +3187,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             send_message(chat_id, "✅ Kechikish o'chirildi — javoblar darhol ketadi.", reply_markup=back_to_menu_keyboard())
         else:
             send_message(chat_id, f"✅ Endi siz {seconds} soniya ichida o'zingiz javob yozmasangiz, "
-                                   f"avto-javob ishga tushadi.", reply_markup=back_to_menu_keyboard())
+                                   f"avto-javob ishga tushadi.", decoration_key="mb7d9bf2b", reply_markup=back_to_menu_keyboard())
         return True
 
     # Quyidagilar faqat adminlar uchun ishlaydi:
@@ -2942,17 +3219,17 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                 targets = list(STATE["admins"])
             sent = 0
             for aid in targets:
-                r = send_message(aid, f"✉️ <b>Superadmindan xabar:</b>\n\n{msg_text}", parse_mode_html=True)
+                r = send_message(aid, f"✉️ <b>Superadmindan xabar:</b>\n\n{msg_text}", decoration_key="mc54503fd", parse_mode_html=True)
                 if r.get("ok"):
                     sent += 1
-            send_message(chat_id, f"✅ Xabaringiz {sent} ta adminga yuborildi.", reply_markup=back_to_panel_keyboard())
+            send_message(chat_id, f"✅ Xabaringiz {sent} ta adminga yuborildi.", decoration_key="mba322c07", reply_markup=back_to_panel_keyboard())
         else:
             token = store_pending_choice({"from_id": user_id, "from_label": sender_label, "text": msg_text})
             keyboard = {"inline_keyboard": [[
                 {"text": "✅ Ruxsat berish", "callback_data": f"adminmsg_ok:{token}"},
                 {"text": "❌ Rad etish", "callback_data": f"adminmsg_no:{token}"},
             ]]}
-            send_message(SUPERADMIN_ID, f"✉️ <b>{sender_label}</b> boshqa adminlarga xabar yubormoqchi:\n\n{msg_text}",
+            send_message(SUPERADMIN_ID, f"✉️ <b>{sender_label}</b> boshqa adminlarga xabar yubormoqchi:\n\n{msg_text}", decoration_key="m91979466",
                          parse_mode_html=True, reply_markup=keyboard)
             send_message(chat_id, "📨 Xabaringiz superadminga tasdiq uchun yuborildi.", reply_markup=back_to_panel_keyboard())
         return True
@@ -2969,7 +3246,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             return True
         mode, new_limit = add_bonus_to_user(target_id, amount)
         period = "kunlik" if mode == "daily" else "haftalik"
-        send_message(chat_id, f"✅ id:{target_id} uchun bonus limit +{amount} qo'shildi. Yangi {period} limit: {new_limit}",
+        send_message(chat_id, f"✅ id:{target_id} uchun bonus limit +{amount} qo'shildi. Yangi {period} limit: {new_limit}", decoration_key="mfe36d993",
                      reply_markup=back_to_panel_keyboard())
         return True
 
@@ -2983,7 +3260,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             send_message(chat_id, "Butun ID kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
             return True
         add_admin(target_id)
-        send_message(chat_id, f"✅ id:{target_id} endi bot admini.", reply_markup=back_to_panel_keyboard())
+        send_message(chat_id, f"✅ id:{target_id} endi bot admini.", decoration_key="m57a14e3a", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "add_force_channel":
@@ -2996,7 +3273,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                          reply_markup=back_to_panel_keyboard())
             return True
         add_force_channel(ch)
-        send_message(chat_id, f"✅ Majburiy kanal qo'shildi: {ch['title']}", reply_markup=back_to_panel_keyboard())
+        send_message(chat_id, f"✅ Majburiy kanal qo'shildi: {ch['title']}", decoration_key="mc08e7370", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "add_bonus_channel":
@@ -3009,7 +3286,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                          reply_markup=back_to_panel_keyboard())
             return True
         add_bonus_channel(ch)
-        send_message(chat_id, f"✅ Bonus kanal qo'shildi: {ch['title']}", reply_markup=back_to_panel_keyboard())
+        send_message(chat_id, f"✅ Bonus kanal qo'shildi: {ch['title']}", decoration_key="mbe472968", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "broadcast":
@@ -3021,7 +3298,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             r = send_message(uid, text)
             if r.get("ok"):
                 sent += 1
-        send_message(chat_id, f"📣 Xabar {sent} ta foydalanuvchiga yuborildi.", reply_markup=back_to_panel_keyboard())
+        send_message(chat_id, f"📣 Xabar {sent} ta foydalanuvchiga yuborildi.", decoration_key="m3649b7e8", reply_markup=back_to_panel_keyboard())
         return True
 
     clear_pending_input(user_id)
@@ -3205,14 +3482,14 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if user_id != SUPERADMIN_ID or not reply:
             return True
         add_admin(reply["from"]["id"])
-        send_message(chat_id, f"✅ {requester_label(reply['from'])} endi bot admini.")
+        send_message(chat_id, f"✅ {requester_label(reply['from'])} endi bot admini.", decoration_key="me48578e4")
         return True
 
     if stripped == ".deladmin":
         if user_id != SUPERADMIN_ID or not reply:
             return True
         remove_admin(reply["from"]["id"])
-        send_message(chat_id, f"❌ {requester_label(reply['from'])} bot adminligidan olindi.")
+        send_message(chat_id, f"❌ {requester_label(reply['from'])} bot adminligidan olindi.", decoration_key="m0bb0279d")
         return True
 
     if stripped == ".del":
@@ -3293,7 +3570,7 @@ def webhook():
         payer_id = msg["from"]["id"]
         until_ts = grant_premium(payer_id, days=182)
         until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-        send_message(msg["chat"]["id"], f"🎉 Premium faollashtirildi! {until_str} sanagacha cheksiz foydalanasiz.")
+        send_message(msg["chat"]["id"], f"🎉 Premium faollashtirildi! {until_str} sanagacha cheksiz foydalanasiz.", decoration_key="m3da8a391")
         notify_admin(f"⭐ Yangi premium xarid: id:{payer_id}, {until_str} gacha")
         return {"ok": True}
 
@@ -3327,6 +3604,72 @@ def webhook():
 
     # Superadmin panelidan kutilayotgan matn kiritish bo'lsa, avval shuni tekshiramiz:
     if handle_pending_input(chat_id, user_id, text, msg.get("entities")):
+        return {"ok": True}
+
+    if text.strip() == ".matnlar" or text.strip().startswith(".matnlar "):
+        if user_id != SUPERADMIN_ID:
+            send_message(chat_id, "Bu buyruq faqat superadmin uchun.")
+            return {"ok": True}
+        parts = text.strip().split()
+        try:
+            page = max(1, int(parts[1])) if len(parts) > 1 else 1
+        except ValueError:
+            page = 1
+        per_page = 15
+        total_pages = (len(TEXT_CATALOG) + per_page - 1) // per_page
+        page = min(page, total_pages)
+        start = (page - 1) * per_page
+        chunk = TEXT_CATALOG[start:start + per_page]
+        kind_icon = {"message": "💬", "button": "🔘", "caption": "🖼"}
+        lines = [f"✨ Matnlar katalogi — sahifa {page}/{total_pages}\n"]
+        for item in chunk:
+            deco = get_text_decoration(item["key"])
+            status = f" [✨ {deco['position']}]" if deco and deco.get("custom_emoji_id") else ""
+            lines.append(f"{item['n']}. {kind_icon.get(item['kind'], '•')} {item['preview']}{status}")
+        lines.append("\nSozlash: .matn <raqam> boshiga|oxiriga <ID yoki emoji>")
+        lines.append("O'chirish: .matn <raqam> off")
+        if page < total_pages:
+            lines.append(f"Keyingi: .matnlar {page + 1}")
+        send_message(chat_id, "\n".join(lines))
+        return {"ok": True}
+
+    if text.strip().startswith(".matn "):
+        if user_id != SUPERADMIN_ID:
+            send_message(chat_id, "Bu buyruq faqat superadmin uchun.")
+            return {"ok": True}
+        parts = text.strip().split(maxsplit=3)
+        if len(parts) < 3:
+            send_message(chat_id, "Format: .matn <raqam> boshiga|oxiriga <ID yoki emoji>\nyoki: .matn <raqam> off")
+            return {"ok": True}
+        ref, action = parts[1], parts[2].lower()
+        item = next((it for it in TEXT_CATALOG if str(it["n"]) == ref or it["key"] == ref), None)
+        if not item:
+            send_message(chat_id, "Bunday raqam/kalit topilmadi. .matnlar bilan ro'yxatni ko'ring.")
+            return {"ok": True}
+        if action == "off":
+            clear_text_decoration(item["key"])
+            send_message(chat_id, f"✅ {item['n']}-dagi bezak o'chirildi.")
+            return {"ok": True}
+        if action not in ("boshiga", "oxiriga"):
+            send_message(chat_id, "Joyi 'boshiga' yoki 'oxiriga' bo'lishi kerak.")
+            return {"ok": True}
+        if len(parts) < 4:
+            send_message(chat_id, "ID yoki emojini ham yozing: .matn <raqam> boshiga|oxiriga <ID yoki emoji>")
+            return {"ok": True}
+        custom_emoji_id = _extract_custom_emoji_id(parts[3], msg.get("entities"))
+        if not custom_emoji_id:
+            send_message(chat_id, "ID topilmadi. Premium emojining o'zini yozing yoki uning raqamli ID'sini kiriting.")
+            return {"ok": True}
+        placeholder = "✨"
+        for ent in (msg.get("entities") or []):
+            if ent.get("type") == "custom_emoji" and ent.get("custom_emoji_id") == custom_emoji_id:
+                raw = text.encode("utf-16-le")
+                seg = raw[ent["offset"] * 2:(ent["offset"] + ent["length"]) * 2]
+                placeholder = seg.decode("utf-16-le")
+                break
+        position = "start" if action == "boshiga" else "end"
+        set_text_decoration(item["key"], custom_emoji_id, position=position, placeholder=placeholder)
+        send_message(chat_id, f"✅ {item['n']}-dagi ({item['kind']}) matnga {action} qo'shildi:")
         return {"ok": True}
 
     if text.strip().startswith(".tgs "):
