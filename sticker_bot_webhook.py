@@ -58,7 +58,7 @@ import logging
 import tempfile
 import subprocess
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from flask import Flask, request
 import requests
@@ -2026,6 +2026,7 @@ def main_menu_keyboard(user_id):
         [{"text": "❓ Yordam", "callback_data": "menu_help"}],
         [{"text": "🏆 Reyting", "callback_data": "menu_leaderboard"}],
         [{"text": "🔑 Avto-javob (Business)", "callback_data": "menu_keywords"}],
+        [{"text": "🕐 Bio soat (Business)", "callback_data": "menu_bioclock"}],
     ]
     if is_admin(user_id):
         rows.append([{"text": "👑 Superadmin panel" if user_id == SUPERADMIN_ID else "🛠 Admin panel",
@@ -2224,6 +2225,37 @@ def handle_callback_query(cq):
             description="Cheksiz pack yuklab olish, kunlik/haftalik limitlarsiz — 6 oy muddatga.",
             payload=f"premium_182:{user_id}", provider_token="", currency="XTR",
             prices=[{"label": "Premium 6 oy", "amount": 100}],
+        )
+        return
+
+    if data == "menu_bioclock":
+        answer_callback_query(cq_id)
+        _render_bioclock_screen(chat_id, message_id, user_id)
+        return
+
+    if data == "bioclock_toggle":
+        answer_callback_query(cq_id)
+        conn_id = get_business_connection_id(user_id)
+        if not conn_id:
+            return
+        cfg = get_bio_clock_config(user_id) or {}
+        was_enabled = bool(cfg.get("enabled"))
+        set_bio_clock(user_id, not was_enabled)
+        if not was_enabled:
+            _bio_clock_tick()  # yoqilgandan keyin darhol bittasini yangilaymiz, 1 daqiqa kutmasin
+        _render_bioclock_screen(chat_id, message_id, user_id)
+        return
+
+    if data == "bioclock_template_start":
+        answer_callback_query(cq_id)
+        if not get_business_connection_id(user_id):
+            return
+        set_pending_input(user_id, "bioclock_template")
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Yangi shablonni yozing. {time} — hozirgi vaqt bilan almashadi.\n\n"
+            f"Masalan: {DEFAULT_BIO_CLOCK_TEMPLATE}",
+            reply_markup=back_to_menu_keyboard(),
         )
         return
 
@@ -3171,6 +3203,22 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                               f"Endi shu bilan yuboraman:", decoration_key="mbe2dfffc", reply_markup=back_to_menu_keyboard())
         return True
 
+    if action == "bioclock_template":
+        clear_pending_input(user_id)
+        template = text.strip()
+        if not template:
+            send_message(chat_id, "Bo'sh bo'lishi mumkin emas. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+            return True
+        if "{time}" not in template:
+            send_message(chat_id, "Shablonda {time} bo'lishi kerak (vaqt shu joyga qo'yiladi).",
+                         reply_markup=back_to_menu_keyboard())
+            return True
+        existing = get_bio_clock_config(user_id) or {}
+        set_bio_clock(user_id, existing.get("enabled", False), template=template)
+        preview = format_bio_clock(template)
+        send_message(chat_id, f"✅ Shablon saqlandi. Namuna: {preview}", reply_markup=back_to_menu_keyboard())
+        return True
+
     if action == "away_delay":
         clear_pending_input(user_id)
         raw = text.strip()
@@ -3317,6 +3365,99 @@ def get_business_owner(connection_id):
     with _state_lock:
         conn = STATE.get("business_connections", {}).get(connection_id)
         return conn.get("owner_id") if conn else None
+
+
+def get_business_connection_id(owner_id):
+    """Berilgan userning HOZIRGI faol business_connection_id'sini topadi (aksincha qidiruv)."""
+    with _state_lock:
+        for conn_id, conn in STATE.get("business_connections", {}).items():
+            if conn.get("owner_id") == owner_id and conn.get("enabled", True):
+                return conn_id
+    return None
+
+
+UZ_TZ = timezone(timedelta(hours=5))  # Asia/Tashkent, DST yo'q — sobit offset yetarli
+DEFAULT_BIO_CLOCK_TEMPLATE = "🕐 {time}"
+
+
+def get_bio_clock_config(owner_id):
+    return STATE.get("bio_clock", {}).get(str(owner_id))
+
+
+def set_bio_clock(owner_id, enabled, template=None):
+    with _state_lock:
+        cfg = STATE.setdefault("bio_clock", {}).setdefault(str(owner_id), {})
+        cfg["enabled"] = enabled
+        if template is not None:
+            cfg["template"] = template
+        cfg.setdefault("template", DEFAULT_BIO_CLOCK_TEMPLATE)
+        save_state_locked()
+
+
+def format_bio_clock(template):
+    now = datetime.now(UZ_TZ).strftime("%H:%M")
+    return (template or DEFAULT_BIO_CLOCK_TEMPLATE).replace("{time}", now)[:140]
+
+
+def _bio_clock_tick():
+    with _state_lock:
+        owners = [int(uid) for uid, cfg in STATE.get("bio_clock", {}).items() if cfg.get("enabled")]
+    for owner_id in owners:
+        conn_id = get_business_connection_id(owner_id)
+        if not conn_id:
+            continue
+        cfg = get_bio_clock_config(owner_id) or {}
+        bio_text = format_bio_clock(cfg.get("template"))
+        result = tg_call("setBusinessAccountBio", business_connection_id=conn_id, bio=bio_text)
+        if not (result and result.get("ok")):
+            log.error("Bio soat yangilanmadi (owner=%s): %s", owner_id, result)
+
+
+def _render_bioclock_screen(chat_id, message_id, user_id):
+    conn_id = get_business_connection_id(user_id)
+    if not conn_id:
+        text = (
+            "🕐 <b>Bio soat</b>\n\n"
+            "Bu funksiya ishlashi uchun botni Telegram Business orqali shaxsiy "
+            "profilingizga ulashingiz kerak (Sozlamalar → Telegram Business → "
+            "Chatbots) va \"profilni tahrirlash\" huquqini berishingiz kerak.\n\n"
+            "Hozircha ulanish topilmadi."
+        )
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True,
+                           reply_markup={"inline_keyboard": [[{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}]]})
+        return
+    cfg = get_bio_clock_config(user_id) or {}
+    enabled = bool(cfg.get("enabled"))
+    template = cfg.get("template", DEFAULT_BIO_CLOCK_TEMPLATE)
+    status = "yoqilgan ✅" if enabled else "o'chirilgan"
+    preview = format_bio_clock(template)
+    text = (
+        "🕐 <b>Bio soat</b>\n\n"
+        "Yoqilsa, profilingizning bio'si har daqiqada avtomatik yangilanib, "
+        "hozirgi vaqtni ko'rsatib turadi (soat:minut, O'zbekiston vaqti).\n\n"
+        f"Holati: {status}\n"
+        f"Shablon: <code>{html.escape(template, quote=False)}</code>\n"
+        f"Hozir shunday ko'rinadi: {html.escape(preview, quote=False)}"
+    )
+    toggle_label = "🚫 O'chirish" if enabled else "▶️ Yoqish"
+    rows = [
+        [{"text": toggle_label, "callback_data": "bioclock_toggle"}],
+        [{"text": "✏️ Shablonni o'zgartirish", "callback_data": "bioclock_template_start"}],
+        [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
+    ]
+    safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+
+
+def _bio_clock_loop():
+    while True:
+        try:
+            _bio_clock_tick()
+        except Exception:
+            log.exception("Bio soat tsiklida xato")
+        time.sleep(60)
+
+
+threading.Thread(target=_bio_clock_loop, daemon=True).start()
 
 
 def send_auto_reply(chat_id, text, entities, business_connection_id):
