@@ -2233,28 +2233,94 @@ def handle_callback_query(cq):
         _render_bioclock_screen(chat_id, message_id, user_id)
         return
 
-    if data == "bioclock_toggle":
+    if data.startswith("bioclock_target:"):
         answer_callback_query(cq_id)
-        conn_id = get_business_connection_id(user_id)
-        if not conn_id:
-            return
-        cfg = get_bio_clock_config(user_id) or {}
-        was_enabled = bool(cfg.get("enabled"))
-        set_bio_clock(user_id, not was_enabled)
-        if not was_enabled:
-            _bio_clock_tick()  # yoqilgandan keyin darhol bittasini yangilaymiz, 1 daqiqa kutmasin
-        _render_bioclock_screen(chat_id, message_id, user_id)
+        target = data.split(":", 1)[1]
+        _render_bioclock_target_screen(chat_id, message_id, user_id, target)
         return
 
-    if data == "bioclock_template_start":
+    if data.startswith("bioclock_toggle:"):
+        answer_callback_query(cq_id)
+        target = data.split(":", 1)[1]
+        if not get_business_connection_id(user_id):
+            return
+        t = get_bio_clock_target(user_id, target)
+        was_enabled = bool(t.get("enabled"))
+        set_bio_clock_target(user_id, target, enabled=not was_enabled)
+        if not was_enabled:
+            threading.Thread(target=_bio_clock_tick, daemon=True).start()  # 1 daqiqa kutmasin
+        _render_bioclock_target_screen(chat_id, message_id, user_id, target)
+        return
+
+    if data.startswith("bioclock_edit:"):
+        answer_callback_query(cq_id)
+        target = data.split(":", 1)[1]
+        if not get_business_connection_id(user_id):
+            return
+        set_pending_input(user_id, "bioclock_template", {"target": target})
+        label = BIO_CLOCK_TARGETS[target]["label"]
+        example = DEFAULT_BIO_CLOCK_TEMPLATE if target == "bio" else "Muslihiddin"
+        safe_edit_or_send(
+            chat_id, message_id,
+            f"{label} uchun — vaqtdan OLDIN nima yozilib tursin? Xohlagan matningni yoz — vaqt "
+            "avtomatik oxiriga qo'shiladi.\n\n"
+            f"Masalan \"{example}\" yozsang, \"{example} 14:35\" kabi chiqadi.\n\n"
+            "Faqat vaqtning o'zi chiqishini xohlasang — bo'sh joy (bitta probel) yuborsang bo'ldi.",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    if data == "bioclock_digits_start":
         answer_callback_query(cq_id)
         if not get_business_connection_id(user_id):
             return
-        set_pending_input(user_id, "bioclock_template")
+        set_pending_input(user_id, "bioclock_digits")
         safe_edit_or_send(
             chat_id, message_id,
-            "Yangi shablonni yozing. {time} — hozirgi vaqt bilan almashadi.\n\n"
-            f"Masalan: {DEFAULT_BIO_CLOCK_TEMPLATE}",
+            "Raqamlaringizni o'z uslubingizda, CHIZIQCHA bilan ajratib, shu tartibda yuboring:\n"
+            "1 - 2 - 3 - 4 - 5 - 6 - 7 - 8 - 9 - 0\n\n"
+            "Masalan shunday yozing (nusxa oling, o'zingiznikiga almashtiring):\n"
+            "①-②-③-④-⑤-⑥-⑦-⑧-⑨-⓪\n\n"
+            "Aynan 10 ta belgi, chiziqcha bilan ajratilgan bo'lishi kerak, tartib yuqoridagidek: "
+            "1,2,3,4,5,6,7,8,9,0. Bu barcha yoqilgan joylar (bio, ism, familiya) uchun bir xilda ishlatiladi.",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    if data == "bioclock_digits_reset":
+        answer_callback_query(cq_id)
+        if not get_business_connection_id(user_id):
+            return
+        clear_bio_clock_digit_map(user_id)
+        _render_bioclock_screen(chat_id, message_id, user_id)
+        return
+
+    if data == "bioclock_extra_start":
+        answer_callback_query(cq_id)
+        if not get_business_connection_id(user_id):
+            return
+        if not is_premium(user_id):
+            safe_edit_or_send(
+                chat_id, message_id,
+                "✨ Bu — Premium foydalanuvchilar uchun. Bio soatingizga vaqtdan tashqari "
+                "qo'shimcha matn/emoji qo'shish imkoniyati beradi.",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "⭐ Premium olish", "callback_data": "menu_premium"}],
+                    [{"text": "⬅️ Orqaga", "callback_data": "menu_bioclock"}],
+                ]},
+            )
+            return
+        set_pending_input(user_id, "bioclock_extra")
+        cfg = get_bio_clock_config(user_id) or {}
+        bio_t = cfg.get("targets", {}).get("bio", {})
+        used = len(format_bio_clock(bio_t.get("template"), cfg.get("digit_map"), max_len=BIO_MAX_LEN))
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Vaqtdan KEYIN qo'shiladigan matn/emojini yozing (bio uchun; ism/familiya qisqaroq "
+            "chegaraga ega, u yerda avtomatik qisqaroq qo'llaniladi).\n\n"
+            f"Joriy sozlamalaringiz ({used} belgi) hisobga olinib, taxminan "
+            f"{max(0, BIO_MAX_LEN - used - 1)} belgigacha joy bor.\n\n"
+            "O'chirish uchun \"yo'q\" deb yozing.",
             reply_markup=back_to_menu_keyboard(),
         )
         return
@@ -3205,18 +3271,62 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
 
     if action == "bioclock_template":
         clear_pending_input(user_id)
-        template = text.strip()
-        if not template:
-            send_message(chat_id, "Bo'sh bo'lishi mumkin emas. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+        data = pending.get("data") or {}
+        target = data.get("target", "bio")
+        info = BIO_CLOCK_TARGETS.get(target, BIO_CLOCK_TARGETS["bio"])
+        prefix = text.strip()
+        if prefix.lower() in ("-", "yo'q", "yoq", "hech narsa", "yoʻq"):
+            prefix = ""
+        set_bio_clock_target(user_id, target, template=prefix)
+        cfg = get_bio_clock_config(user_id) or {}
+        extra = cfg.get("extra") if (target == "bio" and is_premium(user_id)) else None
+        preview = format_bio_clock(prefix, cfg.get("digit_map"), extra, max_len=info["max_len"])
+        send_message(chat_id, f"✅ Saqlandi. {info['label']}'da shunday chiqadi: {preview}",
+                     reply_markup=back_to_menu_keyboard())
+        return True
+
+    if action == "bioclock_digits":
+        clear_pending_input(user_id)
+        parts = [p.strip() for p in text.split("-")]
+        parts = [p for p in parts if p]
+        if len(parts) != 10:
+            send_message(
+                chat_id,
+                f"10 ta belgi kerak edi, {len(parts)} ta topdim. Format: 1-2-3-4-5-6-7-8-9-0 "
+                "tartibida, o'zingiznikini shu joylarga qo'yib yuboring.",
+                reply_markup=back_to_menu_keyboard(),
+            )
             return True
-        if "{time}" not in template:
-            send_message(chat_id, "Shablonda {time} bo'lishi kerak (vaqt shu joyga qo'yiladi).",
-                         reply_markup=back_to_menu_keyboard())
+        order = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+        digit_map = dict(zip(order, parts))
+        set_bio_clock_shared(user_id, digit_map=digit_map)
+        cfg = get_bio_clock_config(user_id) or {}
+        bio_t = cfg.get("targets", {}).get("bio", {})
+        extra = cfg.get("extra") if is_premium(user_id) else None
+        preview = format_bio_clock(bio_t.get("template"), digit_map, extra, max_len=BIO_MAX_LEN)
+        send_message(chat_id, f"✅ Saqlandi. Masalan bio'da shunday chiqadi: {preview}",
+                     reply_markup=back_to_menu_keyboard())
+        return True
+
+    if action == "bioclock_extra":
+        clear_pending_input(user_id)
+        extra = text.strip()
+        if extra.lower() in ("-", "yo'q", "yoq", "hech narsa", "yoʻq"):
+            extra = ""
+        cfg = get_bio_clock_config(user_id) or {}
+        bio_t = cfg.get("targets", {}).get("bio", {})
+        base_len = len(format_bio_clock(bio_t.get("template"), cfg.get("digit_map"), max_len=BIO_MAX_LEN))
+        if base_len + len(extra) + 1 > BIO_MAX_LEN:
+            send_message(
+                chat_id,
+                f"Bu juda uzun bo'lib ketadi ({base_len + len(extra) + 1}/{BIO_MAX_LEN} belgi). "
+                "Qisqaroq matn yuboring.",
+                reply_markup=back_to_menu_keyboard(),
+            )
             return True
-        existing = get_bio_clock_config(user_id) or {}
-        set_bio_clock(user_id, existing.get("enabled", False), template=template)
-        preview = format_bio_clock(template)
-        send_message(chat_id, f"✅ Shablon saqlandi. Namuna: {preview}", reply_markup=back_to_menu_keyboard())
+        set_bio_clock_shared(user_id, extra=extra)
+        preview = format_bio_clock(bio_t.get("template"), cfg.get("digit_map"), extra, max_len=BIO_MAX_LEN)
+        send_message(chat_id, f"✅ Saqlandi. Bio'da shunday chiqadi: {preview}", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "away_delay":
@@ -3377,40 +3487,141 @@ def get_business_connection_id(owner_id):
 
 
 UZ_TZ = timezone(timedelta(hours=5))  # Asia/Tashkent, DST yo'q — sobit offset yetarli
-DEFAULT_BIO_CLOCK_TEMPLATE = "🕐 {time}"
+DEFAULT_BIO_CLOCK_TEMPLATE = "🕐"
+BIO_MAX_LEN = 140  # setBusinessAccountBio o'zi ruxsat beradigan chegara
+NAME_MAX_LEN = 64  # setBusinessAccountName (ism/familiya) chegarasi
+_bio_clock_state = {"last_tick": 0}  # faqat shu process uchun, saqlanmaydi — fon jarayoni
+# to'xtab qolsa (masalan hosting worker qayta ishga tushsa) webhook orqali ushlab olish uchun
+BIO_CLOCK_TARGETS = {
+    "bio": {"label": "Bio", "max_len": BIO_MAX_LEN},
+    "first_name": {"label": "Ism (first name)", "max_len": NAME_MAX_LEN},
+    "last_name": {"label": "Familiya (last name)", "max_len": NAME_MAX_LEN},
+}
+
+
+def _migrate_bio_clock_cfg(cfg):
+    """Eski (faqat bio, 'targets'siz) formatni yangi ko'p-maqsadli formatga o'giradi."""
+    if "targets" not in cfg:
+        old_enabled = cfg.pop("enabled", False)
+        old_template = cfg.pop("template", DEFAULT_BIO_CLOCK_TEMPLATE)
+        cfg["targets"] = {"bio": {"enabled": old_enabled, "template": old_template}}
+    return cfg
 
 
 def get_bio_clock_config(owner_id):
-    return STATE.get("bio_clock", {}).get(str(owner_id))
+    with _state_lock:
+        cfg = STATE.setdefault("bio_clock", {}).get(str(owner_id))
+        if cfg is None:
+            return None
+        migrated = _migrate_bio_clock_cfg(cfg)
+        save_state_locked()
+        return migrated
 
 
-def set_bio_clock(owner_id, enabled, template=None):
+def get_bio_clock_target(owner_id, target):
+    cfg = get_bio_clock_config(owner_id) or {}
+    return cfg.get("targets", {}).get(target, {})
+
+
+def set_bio_clock_target(owner_id, target, enabled=None, template=None):
     with _state_lock:
         cfg = STATE.setdefault("bio_clock", {}).setdefault(str(owner_id), {})
-        cfg["enabled"] = enabled
+        cfg = _migrate_bio_clock_cfg(cfg)
+        t = cfg.setdefault("targets", {}).setdefault(target, {})
+        if enabled is not None:
+            t["enabled"] = enabled
+        t.setdefault("enabled", False)
         if template is not None:
-            cfg["template"] = template
-        cfg.setdefault("template", DEFAULT_BIO_CLOCK_TEMPLATE)
+            t["template"] = template
+        t.setdefault("template", DEFAULT_BIO_CLOCK_TEMPLATE if target == "bio" else "")
         save_state_locked()
 
 
-def format_bio_clock(template):
-    now = datetime.now(UZ_TZ).strftime("%H:%M")
-    return (template or DEFAULT_BIO_CLOCK_TEMPLATE).replace("{time}", now)[:140]
+def set_bio_clock_shared(owner_id, digit_map=None, extra=None):
+    with _state_lock:
+        cfg = STATE.setdefault("bio_clock", {}).setdefault(str(owner_id), {})
+        cfg = _migrate_bio_clock_cfg(cfg)
+        if digit_map is not None:
+            cfg["digit_map"] = digit_map
+        if extra is not None:
+            cfg["extra"] = extra
+        save_state_locked()
+
+
+def clear_bio_clock_digit_map(owner_id):
+    with _state_lock:
+        cfg = STATE.setdefault("bio_clock", {}).setdefault(str(owner_id), {})
+        cfg.pop("digit_map", None)
+        save_state_locked()
+
+
+def any_bio_clock_target_enabled(owner_id):
+    cfg = get_bio_clock_config(owner_id) or {}
+    return any(t.get("enabled") for t in cfg.get("targets", {}).values())
+
+
+def apply_digit_map(time_str, digit_map):
+    if not digit_map:
+        return time_str
+    return "".join(digit_map.get(ch, ch) for ch in time_str)
+
+
+def format_bio_clock(prefix, digit_map=None, extra=None, max_len=BIO_MAX_LEN):
+    now = apply_digit_map(datetime.now(UZ_TZ).strftime("%H:%M"), digit_map)
+    prefix = (prefix if prefix is not None else DEFAULT_BIO_CLOCK_TEMPLATE).strip()
+    parts = [p for p in (prefix, now, (extra or "").strip()) if p]
+    return " ".join(parts)[:max_len]
 
 
 def _bio_clock_tick():
     with _state_lock:
-        owners = [int(uid) for uid, cfg in STATE.get("bio_clock", {}).items() if cfg.get("enabled")]
-    for owner_id in owners:
+        owner_ids = list(STATE.get("bio_clock", {}).keys())
+    updated = 0
+    for uid in owner_ids:
+        owner_id = int(uid)
         conn_id = get_business_connection_id(owner_id)
         if not conn_id:
             continue
         cfg = get_bio_clock_config(owner_id) or {}
-        bio_text = format_bio_clock(cfg.get("template"))
-        result = tg_call("setBusinessAccountBio", business_connection_id=conn_id, bio=bio_text)
-        if not (result and result.get("ok")):
-            log.error("Bio soat yangilanmadi (owner=%s): %s", owner_id, result)
+        targets = cfg.get("targets", {})
+        digit_map = cfg.get("digit_map")
+        extra = cfg.get("extra") if is_premium(owner_id) else None
+
+        bio_t = targets.get("bio", {})
+        if bio_t.get("enabled"):
+            text = format_bio_clock(bio_t.get("template"), digit_map, extra, max_len=BIO_MAX_LEN)
+            result = tg_call("setBusinessAccountBio", business_connection_id=conn_id, bio=text)
+            if result and result.get("ok"):
+                updated += 1
+            else:
+                log.error("Bio soat: bio yangilanmadi (owner=%s): %s", owner_id, result)
+
+        fn_t, ln_t = targets.get("first_name", {}), targets.get("last_name", {})
+        if fn_t.get("enabled") or ln_t.get("enabled"):
+            conn = STATE.get("business_connections", {}).get(conn_id, {})
+            if fn_t.get("enabled"):
+                first_name = format_bio_clock(fn_t.get("template"), digit_map, None, max_len=NAME_MAX_LEN)
+            else:
+                first_name = conn.get("first_name") or ""
+            if ln_t.get("enabled"):
+                last_name = format_bio_clock(ln_t.get("template"), digit_map, None, max_len=NAME_MAX_LEN)
+            else:
+                last_name = conn.get("last_name") or ""
+            if not first_name:
+                log.error("Bio soat: owner=%s uchun ism topilmadi, o'tkazib yuborildi", owner_id)
+            else:
+                params = {"business_connection_id": conn_id, "first_name": first_name}
+                if last_name:
+                    params["last_name"] = last_name
+                result = tg_call("setBusinessAccountName", **params)
+                if result and result.get("ok"):
+                    updated += 1
+                else:
+                    log.error("Bio soat: ism yangilanmadi (owner=%s): %s", owner_id, result)
+
+    _bio_clock_state["last_tick"] = time.time()
+    if owner_ids:
+        log.info("Bio soat tick: %s owner tekshirildi, %s ta yangilandi", len(owner_ids), updated)
 
 
 def _render_bioclock_screen(chat_id, message_id, user_id):
@@ -3427,28 +3638,67 @@ def _render_bioclock_screen(chat_id, message_id, user_id):
                            reply_markup={"inline_keyboard": [[{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}]]})
         return
     cfg = get_bio_clock_config(user_id) or {}
-    enabled = bool(cfg.get("enabled"))
-    template = cfg.get("template", DEFAULT_BIO_CLOCK_TEMPLATE)
+    targets = cfg.get("targets", {})
+    digit_map = cfg.get("digit_map")
+    user_is_premium = is_premium(user_id)
+    extra = cfg.get("extra") if user_is_premium else None
+    digit_sample = apply_digit_map("0123456789", digit_map) if digit_map else "standart (0123456789)"
+    lines = [
+        "🕐 <b>Bio soat</b>\n",
+        "Vaqtni bio, ism va/yoki familiyangizda avtomatik (har daqiqa) ko'rsatib turadi "
+        "(O'zbekiston vaqti). Har biri alohida yoqiladi:\n",
+    ]
+    rows = []
+    for key, info in BIO_CLOCK_TARGETS.items():
+        t = targets.get(key, {})
+        on = bool(t.get("enabled"))
+        mark = "✅" if on else "⚪️"
+        preview = format_bio_clock(t.get("template"), digit_map, extra if key == "bio" else None,
+                                    max_len=info["max_len"]) if on else "—"
+        lines.append(f"{mark} <b>{info['label']}</b>: {html.escape(preview, quote=False)}")
+        rows.append([{"text": f"{info['label']} sozlash", "callback_data": f"bioclock_target:{key}"}])
+    lines.append(f"\nRaqamlar shrifti: {html.escape(digit_sample, quote=False)}")
+    if user_is_premium:
+        lines.append(f"Qo'shimcha matn (Premium, bio'ga): <code>{html.escape(extra, quote=False) if extra else '(yo\u02bcq)'}</code>")
+    text = "\n".join(lines)
+    rows.append([{"text": "🔢 Raqamlar shrifti", "callback_data": "bioclock_digits_start"}])
+    if digit_map:
+        rows.append([{"text": "↩️ Raqamlarni standartga qaytarish", "callback_data": "bioclock_digits_reset"}])
+    rows.append([{"text": "✨ Qo'shimcha matn (Premium)", "callback_data": "bioclock_extra_start"}])
+    rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
+    safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+
+
+def _render_bioclock_target_screen(chat_id, message_id, user_id, target):
+    if target not in BIO_CLOCK_TARGETS:
+        _render_bioclock_screen(chat_id, message_id, user_id)
+        return
+    info = BIO_CLOCK_TARGETS[target]
+    cfg = get_bio_clock_config(user_id) or {}
+    t = cfg.get("targets", {}).get(target, {})
+    enabled = bool(t.get("enabled"))
+    template = t.get("template", DEFAULT_BIO_CLOCK_TEMPLATE if target == "bio" else "")
+    digit_map = cfg.get("digit_map")
+    extra = cfg.get("extra") if (target == "bio" and is_premium(user_id)) else None
     status = "yoqilgan ✅" if enabled else "o'chirilgan"
-    preview = format_bio_clock(template)
+    preview = format_bio_clock(template, digit_map, extra, max_len=info["max_len"])
     text = (
-        "🕐 <b>Bio soat</b>\n\n"
-        "Yoqilsa, profilingizning bio'si har daqiqada avtomatik yangilanib, "
-        "hozirgi vaqtni ko'rsatib turadi (soat:minut, O'zbekiston vaqti).\n\n"
+        f"<b>{info['label']}</b>\n\n"
         f"Holati: {status}\n"
-        f"Shablon: <code>{html.escape(template, quote=False)}</code>\n"
-        f"Hozir shunday ko'rinadi: {html.escape(preview, quote=False)}"
+        f"Vaqtdan oldingi matn: <code>{html.escape(template, quote=False) or '(yo\u02bcq)'}</code>\n"
+        f"Hozir shunday ko'rinadi ({len(preview)}/{info['max_len']} belgi): {html.escape(preview, quote=False)}"
     )
     toggle_label = "🚫 O'chirish" if enabled else "▶️ Yoqish"
     rows = [
-        [{"text": toggle_label, "callback_data": "bioclock_toggle"}],
-        [{"text": "✏️ Shablonni o'zgartirish", "callback_data": "bioclock_template_start"}],
-        [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
+        [{"text": toggle_label, "callback_data": f"bioclock_toggle:{target}"}],
+        [{"text": "✏️ Matnni o'zgartirish", "callback_data": f"bioclock_edit:{target}"}],
+        [{"text": "⬅️ Bio soat", "callback_data": "menu_bioclock"}],
     ]
     safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
 
 
 def _bio_clock_loop():
+    log.info("Bio soat fon jarayoni ishga tushdi")
     while True:
         try:
             _bio_clock_tick()
@@ -3649,6 +3899,9 @@ def webhook():
     global STATE
     update = request.get_json(force=True)
 
+    if time.time() - _bio_clock_state["last_tick"] > 90:
+        threading.Thread(target=_bio_clock_tick, daemon=True).start()
+
     callback_query = update.get("callback_query")
     if callback_query:
         handle_callback_query(callback_query)
@@ -3680,6 +3933,8 @@ def webhook():
             STATE.setdefault("business_connections", {})[conn_id] = {
                 "owner_id": owner.get("id"),
                 "enabled": business_connection.get("is_enabled", True),
+                "first_name": owner.get("first_name", ""),
+                "last_name": owner.get("last_name", ""),
             }
             save_state_locked()
         return {"ok": True}
