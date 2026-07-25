@@ -3576,11 +3576,18 @@ def format_bio_clock(prefix, digit_map=None, extra=None, max_len=BIO_MAX_LEN):
 def _bio_clock_tick():
     with _state_lock:
         owner_ids = list(STATE.get("bio_clock", {}).keys())
+        conn_snapshot = {cid: {"owner_id": c.get("owner_id"), "enabled": c.get("enabled", True)}
+                          for cid, c in STATE.get("business_connections", {}).items()}
     updated = 0
     for uid in owner_ids:
         owner_id = int(uid)
         conn_id = get_business_connection_id(owner_id)
         if not conn_id:
+            log.warning(
+                "Bio soat: owner=%s uchun FAOL business_connection topilmadi, o'tkazib yuborildi. "
+                "Hozirgi ulanishlar (conn_id -> {owner_id, enabled}): %s",
+                owner_id, conn_snapshot,
+            )
             continue
         cfg = get_bio_clock_config(owner_id) or {}
         targets = cfg.get("targets", {})
@@ -3588,15 +3595,21 @@ def _bio_clock_tick():
         extra = cfg.get("extra") if is_premium(owner_id) else None
 
         bio_t = targets.get("bio", {})
+        fn_t, ln_t = targets.get("first_name", {}), targets.get("last_name", {})
+        if not (bio_t.get("enabled") or fn_t.get("enabled") or ln_t.get("enabled")):
+            log.warning("Bio soat: owner=%s uchun conn=%s topildi, lekin HECH BIR target yoqilmagan: %s",
+                        owner_id, conn_id, targets)
+            continue
+
         if bio_t.get("enabled"):
             text = format_bio_clock(bio_t.get("template"), digit_map, extra, max_len=BIO_MAX_LEN)
             result = tg_call("setBusinessAccountBio", business_connection_id=conn_id, bio=text)
             if result and result.get("ok"):
                 updated += 1
+                log.info("Bio soat: bio yangilandi (owner=%s): %s", owner_id, text)
             else:
-                log.error("Bio soat: bio yangilanmadi (owner=%s): %s", owner_id, result)
+                log.error("Bio soat: bio yangilanmadi (owner=%s, conn=%s): %s", owner_id, conn_id, result)
 
-        fn_t, ln_t = targets.get("first_name", {}), targets.get("last_name", {})
         if fn_t.get("enabled") or ln_t.get("enabled"):
             conn = STATE.get("business_connections", {}).get(conn_id, {})
             if fn_t.get("enabled"):
@@ -3608,7 +3621,8 @@ def _bio_clock_tick():
             else:
                 last_name = conn.get("last_name") or ""
             if not first_name:
-                log.error("Bio soat: owner=%s uchun ism topilmadi, o'tkazib yuborildi", owner_id)
+                log.error("Bio soat: owner=%s uchun ism topilmadi (known conn data: %s), o'tkazib yuborildi",
+                         owner_id, conn)
             else:
                 params = {"business_connection_id": conn_id, "first_name": first_name}
                 if last_name:
@@ -3616,8 +3630,9 @@ def _bio_clock_tick():
                 result = tg_call("setBusinessAccountName", **params)
                 if result and result.get("ok"):
                     updated += 1
+                    log.info("Bio soat: ism yangilandi (owner=%s): %s %s", owner_id, first_name, last_name)
                 else:
-                    log.error("Bio soat: ism yangilanmadi (owner=%s): %s", owner_id, result)
+                    log.error("Bio soat: ism yangilanmadi (owner=%s, conn=%s): %s", owner_id, conn_id, result)
 
     _bio_clock_state["last_tick"] = time.time()
     if owner_ids:
