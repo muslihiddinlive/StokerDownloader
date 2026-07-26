@@ -673,6 +673,7 @@ def save_state_locked():
     if _pinned_message_id:
         ok, result = _upload_state_document(message_id=_pinned_message_id)
         if ok:
+            log.info("STATE saqlandi (edit, message_id=%s)", _pinned_message_id)
             return
         log.warning("editMessageMedia muvaffaqiyatsiz (%s), yangi fayl yuboriladi.", result)
 
@@ -680,6 +681,7 @@ def save_state_locked():
     if ok:
         _pinned_message_id = result["result"]["message_id"]
         tg_call("pinChatMessage", chat_id=DB_GROUP_ID, message_id=_pinned_message_id, disable_notification=True)
+        log.info("STATE saqlandi (yangi fayl, message_id=%s)", _pinned_message_id)
     else:
         log.error("STATE saqlashda xato: %s", result)
 
@@ -2246,7 +2248,12 @@ def handle_callback_query(cq):
             return
         t = get_bio_clock_target(user_id, target)
         was_enabled = bool(t.get("enabled"))
+        log.info("Bio soat: TOGGLE bosildi (owner=%s, target=%s, %s -> %s)",
+                 user_id, target, was_enabled, not was_enabled)
         set_bio_clock_target(user_id, target, enabled=not was_enabled)
+        confirm = get_bio_clock_target(user_id, target)
+        log.info("Bio soat: TOGGLE'dan keyin saqlangan qiymat (owner=%s, target=%s): %s",
+                 user_id, target, confirm)
         if not was_enabled:
             threading.Thread(target=_bio_clock_tick, daemon=True).start()  # 1 daqiqa kutmasin
         _render_bioclock_target_screen(chat_id, message_id, user_id, target)
