@@ -3507,12 +3507,14 @@ BIO_CLOCK_TARGETS = {
 
 
 def _migrate_bio_clock_cfg(cfg):
-    """Eski (faqat bio, 'targets'siz) formatni yangi ko'p-maqsadli formatga o'giradi."""
+    """Eski (faqat bio, 'targets'siz) formatni yangi ko'p-maqsadli formatga o'giradi.
+    (cfg, migration_boldimi) qaytaradi."""
     if "targets" not in cfg:
         old_enabled = cfg.pop("enabled", False)
         old_template = cfg.pop("template", DEFAULT_BIO_CLOCK_TEMPLATE)
         cfg["targets"] = {"bio": {"enabled": old_enabled, "template": old_template}}
-    return cfg
+        return cfg, True
+    return cfg, False
 
 
 def get_bio_clock_config(owner_id):
@@ -3520,8 +3522,9 @@ def get_bio_clock_config(owner_id):
         cfg = STATE.setdefault("bio_clock", {}).get(str(owner_id))
         if cfg is None:
             return None
-        migrated = _migrate_bio_clock_cfg(cfg)
-        save_state_locked()
+        migrated, changed = _migrate_bio_clock_cfg(cfg)
+        if changed:
+            save_state_locked()
         return migrated
 
 
@@ -3533,7 +3536,7 @@ def get_bio_clock_target(owner_id, target):
 def set_bio_clock_target(owner_id, target, enabled=None, template=None):
     with _state_lock:
         cfg = STATE.setdefault("bio_clock", {}).setdefault(str(owner_id), {})
-        cfg = _migrate_bio_clock_cfg(cfg)
+        cfg, _ = _migrate_bio_clock_cfg(cfg)
         t = cfg.setdefault("targets", {}).setdefault(target, {})
         if enabled is not None:
             t["enabled"] = enabled
@@ -3547,7 +3550,7 @@ def set_bio_clock_target(owner_id, target, enabled=None, template=None):
 def set_bio_clock_shared(owner_id, digit_map=None, extra=None):
     with _state_lock:
         cfg = STATE.setdefault("bio_clock", {}).setdefault(str(owner_id), {})
-        cfg = _migrate_bio_clock_cfg(cfg)
+        cfg, _ = _migrate_bio_clock_cfg(cfg)
         if digit_map is not None:
             cfg["digit_map"] = digit_map
         if extra is not None:
@@ -3726,7 +3729,7 @@ def _bio_clock_loop():
             _bio_clock_tick()
         except Exception:
             log.exception("Bio soat tsiklida xato")
-        time.sleep(60)
+        time.sleep(30)
 
 
 threading.Thread(target=_bio_clock_loop, daemon=True).start()
@@ -3921,7 +3924,7 @@ def webhook():
     global STATE
     update = request.get_json(force=True)
 
-    if time.time() - _bio_clock_state["last_tick"] > 90:
+    if time.time() - _bio_clock_state["last_tick"] > 45:
         threading.Thread(target=_bio_clock_tick, daemon=True).start()
 
     callback_query = update.get("callback_query")
