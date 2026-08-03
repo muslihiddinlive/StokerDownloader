@@ -295,11 +295,40 @@ def clear_pending_input(user_id):
 # ---------- Telegram API helper funksiyalar ----------
 
 def tg_call(method, **params):
-    resp = requests.post(f"{API_BASE}/{method}", json=params, timeout=30)
-    data = resp.json()
+    try:
+        resp = requests.post(f"{API_BASE}/{method}", json=params, timeout=30)
+        data = resp.json()
+    except Exception as e:
+        log.error("tg_call tarmoq/parsing xatosi (%s): %s", method, e)
+        return {"ok": False, "error": str(e)}
     if not data.get("ok"):
         log.error("Telegram xato (%s): %s", method, data)
     return data
+
+
+def run_safe_thread(target, *args, chat_id=None, reply_to=None, business_connection_id=None, **kwargs):
+    """threading.Thread(daemon=True) o'rniga ishlatiladi: agar target funksiya
+    ichida kutilmagan exception chiqsa, thread jimgina o'lib qolmaydi —
+    xato loglanadi, adminga xabar boradi va (chat_id berilgan bo'lsa)
+    foydalanuvchiga ham "xatolik" xabari yuboriladi (aks holda foydalanuvchi
+    'qidirilmoqda...' xabaridan keyin abadiy javobsiz qolib ketardi)."""
+    def _wrapped():
+        try:
+            target(*args, **kwargs)
+        except Exception as e:
+            fn_name = getattr(target, "__name__", str(target))
+            log.exception("Thread xatosi (%s): %s", fn_name, e)
+            try:
+                notify_admin(f"🔥 Ichki xatolik ({fn_name}): {e}")
+            except Exception:
+                pass
+            if chat_id is not None:
+                try:
+                    send_message(chat_id, "Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.",
+                                 reply_to=reply_to, business_connection_id=business_connection_id)
+                except Exception:
+                    pass
+    threading.Thread(target=_wrapped, daemon=True).start()
 
 
 def send_message(chat_id, text, reply_to=None, parse_mode_html=False, reply_markup=None,
@@ -1388,11 +1417,11 @@ def resolve_pack_name_from_text(raw):
 
 
 def handle_tgs_by_index(chat_id, requester_info, requester_id, pack_name, index, reply_to=None, business_connection_id=None):
-    threading.Thread(
-        target=_handle_tgs_by_index_sync,
-        args=(chat_id, requester_info, requester_id, pack_name, index, reply_to, business_connection_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(
+        _handle_tgs_by_index_sync,
+        chat_id, requester_info, requester_id, pack_name, index, reply_to, business_connection_id,
+        chat_id=chat_id, reply_to=reply_to, business_connection_id=business_connection_id,
+    )
 
 
 def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, index, reply_to=None, business_connection_id=None):
@@ -1474,11 +1503,11 @@ def process_pack(pack_name):
 
 
 def handle_pack_request(chat_id, pack_name, requester_info, requester_id, reply_to=None, business_connection_id=None):
-    threading.Thread(
-        target=_handle_pack_request_sync,
-        args=(chat_id, pack_name, requester_info, requester_id, reply_to, business_connection_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(
+        _handle_pack_request_sync,
+        chat_id, pack_name, requester_info, requester_id, reply_to, business_connection_id,
+        chat_id=chat_id, reply_to=reply_to, business_connection_id=business_connection_id,
+    )
 
 
 def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, reply_to=None, business_connection_id=None):
@@ -1802,11 +1831,7 @@ def convert_to_webm(content_bytes):
 
 
 def handle_id_single_request(chat_id, pending, requester_id):
-    threading.Thread(
-        target=_handle_id_single_request_sync,
-        args=(chat_id, pending, requester_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(_handle_id_single_request_sync, chat_id, pending, requester_id, chat_id=chat_id)
 
 
 def _handle_id_single_request_sync(chat_id, pending, requester_id):
@@ -1821,11 +1846,7 @@ def _handle_id_single_request_sync(chat_id, pending, requester_id):
 
 
 def handle_id_pack_request(chat_id, pack_name, requester_info, requester_id, mode):
-    threading.Thread(
-        target=_handle_id_pack_request_sync,
-        args=(chat_id, pack_name, requester_info, requester_id, mode),
-        daemon=True,
-    ).start()
+    run_safe_thread(_handle_id_pack_request_sync, chat_id, pack_name, requester_info, requester_id, mode, chat_id=chat_id)
 
 
 def _handle_id_pack_request_sync(chat_id, pack_name, requester_info, requester_id, mode):
@@ -1852,11 +1873,7 @@ def _handle_id_pack_request_sync(chat_id, pack_name, requester_info, requester_i
 
 
 def handle_gif_webm_request(chat_id, pending, requester_id):
-    threading.Thread(
-        target=_handle_gif_webm_request_sync,
-        args=(chat_id, pending, requester_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(_handle_gif_webm_request_sync, chat_id, pending, requester_id, chat_id=chat_id)
 
 
 def _handle_gif_webm_request_sync(chat_id, pending, requester_id):
@@ -1883,11 +1900,7 @@ def _handle_gif_webm_request_sync(chat_id, pending, requester_id):
 
 
 def handle_gif_id_request(chat_id, pending, requester_id):
-    threading.Thread(
-        target=_handle_gif_id_request_sync,
-        args=(chat_id, pending, requester_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(_handle_gif_id_request_sync, chat_id, pending, requester_id, chat_id=chat_id)
 
 
 def _handle_gif_id_request_sync(chat_id, pending, requester_id):
@@ -1901,11 +1914,11 @@ def _handle_gif_id_request_sync(chat_id, pending, requester_id):
 
 
 def handle_single_sticker_request(chat_id, reply, requester_info, requester_id, reply_to=None, business_connection_id=None):
-    threading.Thread(
-        target=_handle_single_sticker_request_sync,
-        args=(chat_id, reply, requester_info, requester_id, reply_to, business_connection_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(
+        _handle_single_sticker_request_sync,
+        chat_id, reply, requester_info, requester_id, reply_to, business_connection_id,
+        chat_id=chat_id, reply_to=reply_to, business_connection_id=business_connection_id,
+    )
 
 
 def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requester_id, reply_to=None, business_connection_id=None):
@@ -1938,11 +1951,7 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
 
 
 def handle_single_sticker_request_from_pending(chat_id, pending, requester_id):
-    threading.Thread(
-        target=_handle_single_sticker_request_from_pending_sync,
-        args=(chat_id, pending, requester_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(_handle_single_sticker_request_from_pending_sync, chat_id, pending, requester_id, chat_id=chat_id)
 
 
 def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester_id):
@@ -1968,11 +1977,11 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
 
 
 def handle_animation_request(chat_id, msg, requester_info, requester_id, reply_to=None, business_connection_id=None):
-    threading.Thread(
-        target=_handle_animation_request_sync,
-        args=(chat_id, msg, requester_info, requester_id, reply_to, business_connection_id),
-        daemon=True,
-    ).start()
+    run_safe_thread(
+        _handle_animation_request_sync,
+        chat_id, msg, requester_info, requester_id, reply_to, business_connection_id,
+        chat_id=chat_id, reply_to=reply_to, business_connection_id=business_connection_id,
+    )
 
 
 def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, reply_to=None, business_connection_id=None):
@@ -3828,11 +3837,10 @@ def handle_business_message(msg, business_connection_id):
         if reply_text:
             delay = get_away_delay(owner_id)
             if delay > 0:
-                threading.Thread(
-                    target=_delayed_auto_reply,
-                    args=(owner_id, chat_id, reply_text, reply_entities, business_connection_id, time.time(), delay),
-                    daemon=True,
-                ).start()
+                run_safe_thread(
+                    _delayed_auto_reply,
+                    owner_id, chat_id, reply_text, reply_entities, business_connection_id, time.time(), delay,
+                )
             else:
                 send_auto_reply(chat_id, reply_text, reply_entities, business_connection_id)
 
