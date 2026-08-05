@@ -295,9 +295,24 @@ def clear_pending_input(user_id):
 
 # ---------- Telegram API helper funksiyalar ----------
 
+# Har bir so'rovda yangi TCP/TLS ulanish ochmaslik uchun global Session (connection pooling).
+# Parallel yuklashlar (ThreadPoolExecutor) bilan birga bu tezlikni sezilarli oshiradi.
+_http_session = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=32,
+    pool_maxsize=32,
+    max_retries=requests.adapters.Retry(
+        total=2, backoff_factor=0.3,
+        status_forcelist=[500, 502, 503, 504],
+    ),
+)
+_http_session.mount("https://", _http_adapter)
+_http_session.mount("http://", _http_adapter)
+
+
 def tg_call(method, **params):
     try:
-        resp = requests.post(f"{API_BASE}/{method}", json=params, timeout=30)
+        resp = _http_session.post(f"{API_BASE}/{method}", json=params, timeout=30)
         data = resp.json()
     except Exception as e:
         log.error("tg_call tarmoq/parsing xatosi (%s): %s", method, e)
@@ -435,7 +450,7 @@ def send_document_bytes(chat_id, filename, file_bytes, caption=None, business_co
             payload["caption_entities"] = json.dumps(send_ents)
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
-    resp = requests.post(f"{API_BASE}/sendDocument", data=payload, files=files, timeout=60)
+    resp = _http_session.post(f"{API_BASE}/sendDocument", data=payload, files=files, timeout=60)
     try:
         data = resp.json()
     except ValueError:
@@ -464,7 +479,7 @@ def send_video_bytes(chat_id, filename, file_bytes, caption=None, business_conne
             payload["caption_entities"] = json.dumps(send_ents)
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
-    resp = requests.post(f"{API_BASE}/sendVideo", data=payload, files=files, timeout=60)
+    resp = _http_session.post(f"{API_BASE}/sendVideo", data=payload, files=files, timeout=60)
     try:
         data = resp.json()
     except ValueError:
@@ -494,7 +509,7 @@ def send_animation_bytes(chat_id, filename, file_bytes, caption=None, business_c
             payload["caption_entities"] = json.dumps(send_ents)
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
-    resp = requests.post(f"{API_BASE}/sendAnimation", data=payload, files=files, timeout=60)
+    resp = _http_session.post(f"{API_BASE}/sendAnimation", data=payload, files=files, timeout=60)
     try:
         data = resp.json()
     except ValueError:
@@ -626,7 +641,7 @@ def get_file_path(file_id):
 
 
 def download_file_bytes(file_path):
-    resp = requests.get(f"{FILE_BASE}/{file_path}", timeout=60)
+    resp = _http_session.get(f"{FILE_BASE}/{file_path}", timeout=60)
     resp.raise_for_status()
     return resp.content
 
@@ -691,10 +706,10 @@ def _upload_state_document(method_extra_fields=None, message_id=None):
     if message_id:
         media = json.dumps({"type": "document", "media": "attach://document"})
         form = {"chat_id": DB_GROUP_ID, "message_id": message_id, "media": media}
-        resp = requests.post(f"{API_BASE}/editMessageMedia", data=form, files=files, timeout=30)
+        resp = _http_session.post(f"{API_BASE}/editMessageMedia", data=form, files=files, timeout=30)
     else:
         form = {"chat_id": DB_GROUP_ID}
-        resp = requests.post(f"{API_BASE}/sendDocument", data=form, files=files, timeout=30)
+        resp = _http_session.post(f"{API_BASE}/sendDocument", data=form, files=files, timeout=30)
     try:
         result = resp.json()
     except ValueError:
@@ -1502,7 +1517,7 @@ def _fetch_sticker_bytes(i, sticker):
     return i, fname, content
 
 
-def process_pack(pack_name, max_workers=8):
+def process_pack(pack_name, max_workers=12):
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
         return None, "Pack topilmadi. Nomini tekshiring."
