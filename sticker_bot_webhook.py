@@ -58,6 +58,7 @@ import logging
 import tempfile
 import subprocess
 import threading
+import concurrent.futures
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, request
@@ -511,10 +512,19 @@ def send_sticker_by_file_id(chat_id, file_id, business_connection_id=None):
     return tg_call("sendSticker", **params)
 
 
-def send_document_by_file_id(chat_id, file_id, caption=None, business_connection_id=None):
+def send_document_by_file_id(chat_id, file_id, caption=None, business_connection_id=None,
+                              caption_entities=None, decoration_key=None):
     params = {"chat_id": chat_id, "document": file_id}
     if caption:
-        params["caption"] = caption
+        send_caption, send_ents = caption, caption_entities
+        if not caption_entities:
+            key = decoration_key or _auto_text_key(caption)
+            dtext, dents = decorate_text(key, caption)
+            if dents:
+                send_caption, send_ents = dtext, dents
+        params["caption"] = send_caption
+        if send_ents:
+            params["caption_entities"] = send_ents  # tg_call json= orqali yuboradi, dumps kerak emas
     if business_connection_id:
         params["business_connection_id"] = business_connection_id
     return tg_call("sendDocument", **params)
@@ -1480,22 +1490,43 @@ def pack_content_hash(sticker_set):
     return hashlib.sha256("|".join(ids).encode()).hexdigest()
 
 
-def process_pack(pack_name):
+def _fetch_sticker_bytes(i, sticker):
+    """Bitta stiker uchun getFile + yuklab olish — parallel chaqirish uchun."""
+    file_path = get_file_path(sticker["file_id"])
+    if not file_path:
+        return i, None, None
+    content = download_file_bytes(file_path)
+    ext = file_ext_for(sticker)
+    emoji_char = sticker.get("emoji", "")
+    fname = f"{i:03d}_{emoji_char}{ext}".replace("/", "_")
+    return i, fname, content
+
+
+def process_pack(pack_name, max_workers=8):
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
         return None, "Pack topilmadi. Nomini tekshiring."
     stickers = sticker_set["stickers"]
     buf = io.BytesIO()
     count = 0
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for i, sticker in enumerate(stickers, start=1):
-            file_path = get_file_path(sticker["file_id"])
-            if not file_path:
+    # getFile + yuklab olish tarmoq I/O — ThreadPoolExecutor bilan parallel bajariladi,
+    # aks holda har bir stiker ketma-ket kutilib, katta pack'larda juda sekin bo'lardi.
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_fetch_sticker_bytes, i, s)
+                   for i, s in enumerate(stickers, start=1)]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                i, fname, content = fut.result()
+            except Exception as e:
+                log.error("Stiker yuklashda xato (pack=%s): %s", pack_name, e)
                 continue
-            content = download_file_bytes(file_path)
-            ext = file_ext_for(sticker)
-            emoji_char = sticker.get("emoji", "")
-            fname = f"{i:03d}_{emoji_char}{ext}".replace("/", "_")
+            if fname is not None and content is not None:
+                results[i] = (fname, content)
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i in sorted(results):
+            fname, content = results[i]
             zf.writestr(fname, content)
             count += 1
     buf.seek(0)
