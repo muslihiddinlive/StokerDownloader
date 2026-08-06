@@ -48,6 +48,7 @@ MUHIM: Render Start Command'da bitta worker ishlatilishi kerak:
 
 import os
 import io
+import re
 import json
 import html
 import time
@@ -1672,6 +1673,34 @@ def extract_animation_file(msg):
     return None, None
 
 
+def extract_all_custom_emoji_ids(msg):
+    """Xabardagi barcha (takrorlanmas, tartib saqlangan holda) custom_emoji ID'larini qaytaradi.
+    1 ta xabarda 2, 10 yoki undan ko'p animated/premium emoji bo'lishi mumkin — hammasini olamiz."""
+    ids, seen = [], set()
+    for field, entity_field in (("text", "entities"), ("caption", "caption_entities")):
+        entities = msg.get(entity_field) or []
+        for ent in entities:
+            if ent.get("type") == "custom_emoji" and ent.get("custom_emoji_id"):
+                cid = ent["custom_emoji_id"]
+                if cid not in seen:
+                    seen.add(cid)
+                    ids.append(cid)
+    return ids
+
+
+def get_custom_emoji_stickers_batch(custom_emoji_ids):
+    """getCustomEmojiStickers bitta chaqiruvda ko'p ID qabul qiladi (Telegram limiti: 200)."""
+    if not custom_emoji_ids:
+        return []
+    all_results = []
+    for chunk_start in range(0, len(custom_emoji_ids), 200):
+        chunk = custom_emoji_ids[chunk_start:chunk_start + 200]
+        data = tg_call("getCustomEmojiStickers", custom_emoji_ids=chunk)
+        if data.get("ok"):
+            all_results.extend(data["result"])
+    return all_results
+
+
 def extract_single_sticker_file(msg):
     sticker = msg.get("sticker")
     if sticker:
@@ -1685,6 +1714,98 @@ def extract_single_sticker_file(msg):
                     em = data["result"][0]
                     return em["file_id"], file_ext_for(em), em.get("emoji", ""), "emoji", ent["custom_emoji_id"]
     return None, None, None, None, None
+
+
+def handle_multi_emoji_request(chat_id, custom_emoji_ids, requester_info, requester_id, reply_to=None, business_connection_id=None):
+    run_safe_thread(
+        _handle_multi_emoji_request_sync,
+        chat_id, custom_emoji_ids, requester_info, requester_id, reply_to, business_connection_id,
+        chat_id=chat_id, reply_to=reply_to, business_connection_id=business_connection_id,
+    )
+
+
+def _handle_multi_emoji_request_sync(chat_id, custom_emoji_ids, requester_info, requester_id, reply_to=None, business_connection_id=None):
+    """Bitta xabarda 2 tadan 200 tagacha animated/premium emoji bo'lsa — HAMMASINI parallel yuklab, bitta ZIP qilib beradi."""
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
+        return
+    stickers = get_custom_emoji_stickers_batch(custom_emoji_ids)
+    if not stickers:
+        send_message(chat_id, "Bu emojilarni topib bo'lmadi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
+        return
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+        futures = [executor.submit(_fetch_sticker_bytes, i, s) for i, s in enumerate(stickers, start=1)]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                i, fname, content = fut.result()
+            except Exception as e:
+                log.error("Multi-emoji yuklashda xato: %s", e)
+                continue
+            if fname is not None and content is not None:
+                results[i] = (fname, content)
+    if not results:
+        send_message(chat_id, "Fayllarni yuklab bo'lmadi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
+        return
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i in sorted(results):
+            fname, content = results[i]
+            zf.writestr(fname, content)
+    buf.seek(0)
+    zip_bytes = buf.getvalue()
+    n = len(results)
+    zip_name = f"emoji_{n}ta_{int(datetime.now(timezone.utc).timestamp())}.zip"
+    register_request(requester_id, kind="multi_emoji", detail=f"{n} ta")
+    send_document_bytes(chat_id, zip_name, zip_bytes,
+                        caption=f"✅ {n} ta animated/premium emoji ZIP qilindi.",
+                        business_connection_id=business_connection_id)
+    notify_admin(f"✅ {n} ta emoji yuklandi (bitta xabardan)\nKimdan: {requester_info}")
+    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan {n} ta emoji", decoration_key="c7c1e2f8f")
+    if CACHE_GROUP_ID:
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan {n} ta emoji", decoration_key="c7c1e2f8f")
+
+
+# Telegram file_id'lar odatda base64-url-safe alifboda (A-Z a-z 0-9 _ -) va 20+ belgi uzunlikda bo'ladi.
+_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{20,250}$")
+
+
+def handle_direct_file_id_request(chat_id, file_id, requester_info, requester_id, reply_to=None, business_connection_id=None):
+    run_safe_thread(
+        _handle_direct_file_id_request_sync,
+        chat_id, file_id, requester_info, requester_id, reply_to, business_connection_id,
+        chat_id=chat_id, reply_to=reply_to, business_connection_id=business_connection_id,
+    )
+
+
+def _handle_direct_file_id_request_sync(chat_id, file_id, requester_info, requester_id, reply_to=None, business_connection_id=None):
+    """Foydalanuvchi sticker/emoji/gif ni forward qilish o'rniga to'g'ridan-to'g'ri file_id yozib yuborsa ham ishlaydi."""
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
+        return
+    file_path = get_file_path(file_id)
+    if not file_path:
+        send_message(chat_id, "Bu ID bo'yicha fayl topilmadi (ID noto'g'ri yoki botga tegishli emas).",
+                     reply_to=reply_to, business_connection_id=business_connection_id)
+        return
+    content = download_file_bytes(file_path)
+    ext = ("." + file_path.rsplit(".", 1)[-1]) if "." in file_path else ""
+    filename = f"file_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+    register_request(requester_id, kind="direct_id", detail=filename)
+    zip_bytes = zip_single_file(filename, content)
+    zip_name = f"{filename}.zip"
+    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.",
+                        business_connection_id=business_connection_id)
+    notify_admin(f"✅ ID orqali fayl yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
+    if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
+        send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} ID orqali yuklagan fayl", decoration_key="c7c1e2f8f")
+    if CACHE_GROUP_ID:
+        send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} ID orqali yuklagan fayl", decoration_key="c7c1e2f8f")
 
 
 def zip_single_file(filename, content):
@@ -4184,6 +4305,14 @@ def webhook():
         send_message(chat_id, greeting, reply_markup=main_menu_keyboard(user_id))
         return {"ok": True}
 
+    # ---- Bitta xabarda 2+ animated/premium emoji: hammasini birdan ZIP qilib beramiz ----
+    custom_emoji_ids = extract_all_custom_emoji_ids(msg)
+    if len(custom_emoji_ids) > 1:
+        if not enforce_force_join(chat_id, user_id):
+            return {"ok": True}
+        handle_multi_emoji_request(chat_id, custom_emoji_ids, requester_info, user_id)
+        return {"ok": True}
+
     # ---- Bitta sticker/custom emoji forward qilindi: tanlov beramiz ----
     file_id, ext, emoji_char, sticker_kind, custom_emoji_id = extract_single_sticker_file(msg)
     if file_id:
@@ -4230,6 +4359,14 @@ def webhook():
             [{"text": "🆔 Butun pack ID'larini berish", "callback_data": f"dl_id_pack:{token}"}],
         ]
         send_message(chat_id, "Nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
+        return {"ok": True}
+
+    # ---- Foydalanuvchi sticker/emoji/GIF ning file_id sini to'g'ridan-to'g'ri matn qilib yuborgan bo'lishi mumkin ----
+    stripped_text = text.strip()
+    if stripped_text and " " not in stripped_text and _FILE_ID_RE.match(stripped_text):
+        if not enforce_force_join(chat_id, user_id):
+            return {"ok": True}
+        handle_direct_file_id_request(chat_id, stripped_text, requester_info, user_id)
         return {"ok": True}
 
     send_message(chat_id, "Sticker/emoji/GIF forward qiling yoki pastdagi menyudan foydalaning 👇",
