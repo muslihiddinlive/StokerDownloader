@@ -864,6 +864,49 @@ def clear_text_decoration(key):
         return removed
 
 
+
+
+_POST_BRACKET_RE = __import__("re").compile(r"\[(\d{5,})\]")
+_POST_PLACEHOLDER = "\U0001F31F"
+
+
+def build_post_entities_from_brackets(template):
+    result_text = ""
+    entities = []
+    last_end = 0
+    utf16_offset = 0
+    for m in _POST_BRACKET_RE.finditer(template):
+        prefix = template[last_end:m.start()]
+        result_text += prefix
+        utf16_offset += utf16_len(prefix)
+        emoji_id = m.group(1)
+        result_text += _POST_PLACEHOLDER
+        length = utf16_len(_POST_PLACEHOLDER)
+        entities.append({
+            "type": "custom_emoji", "offset": utf16_offset,
+            "length": length, "custom_emoji_id": emoji_id,
+        })
+        utf16_offset += length
+        last_end = m.end()
+    result_text += template[last_end:]
+    return result_text, entities
+
+
+def post_pick_keyboard(items, page, page_size=8):
+    start = page * page_size
+    chunk = items[start:start + page_size]
+    rows = [[{"text": label, "callback_data": f"post_pick:{key}"}] for key, label in chunk]
+    nav = []
+    if page > 0:
+        nav.append({"text": "\u2b05\ufe0f", "callback_data": f"panel_post_channel:{page - 1}"})
+    if start + page_size < len(items):
+        nav.append({"text": "\u27a1\ufe0f", "callback_data": f"panel_post_channel:{page + 1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "\u2b05\ufe0f Panel", "callback_data": "menu_admin_panel"}])
+    return {"inline_keyboard": rows}
+
+
 def decorate_text(key, text):
     deco = get_text_decoration(key)
     if not deco or not deco.get("custom_emoji_id"):
@@ -2249,6 +2292,7 @@ def admin_panel_keyboard(user_id):
             {"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"},
         ])
         rows.append([{"text": "✨ Bot imzosi (premium emoji)", "callback_data": "panel_signature"}])
+        rows.append([{"text": "📤 Kanalga post (emoji bilan)", "callback_data": "panel_post_channel:0"}])
         rows.append([
             {"text": "🏆 Referal reyting", "callback_data": "panel_leaderboard"},
             {"text": "📤 Eksport (CSV)", "callback_data": "panel_export"},
@@ -2889,6 +2933,33 @@ def handle_callback_query(cq):
                            reply_markup=_paginate_keyboard(items, "channel_detail", page))
         return
 
+    if data.startswith("panel_post_channel:"):
+        answer_callback_query(cq_id)
+        page = int(data.split(":", 1)[1])
+        with _state_lock:
+            channels = dict(STATE.get("channels", {}))
+        items = [(cid, info.get("title", cid)) for cid, info in channels.items()]
+        if not items:
+            safe_edit_or_send(chat_id, message_id, "Hozircha ro'yxatda kanal yo'q.",
+                               reply_markup=back_to_panel_keyboard())
+            return
+        safe_edit_or_send(chat_id, message_id, f"Post yuborish uchun kanalni tanlang ({len(items)}):",
+                           reply_markup=post_pick_keyboard(items, page))
+        return
+
+    if data.startswith("post_pick:"):
+        answer_callback_query(cq_id)
+        cid = data.split(":", 1)[1]
+        with _state_lock:
+            title = STATE.get("channels", {}).get(cid, {}).get("title", cid)
+        set_pending_input(user_id, "post_channel_text", {"channel_id": cid, "channel_title": title})
+        safe_edit_or_send(
+            chat_id, message_id,
+            f"Matn yozing. Emoji ID ni [ID] shaklida yozing.",
+            reply_markup=back_to_panel_keyboard(),
+        )
+        return
+
     if data.startswith("channel_detail:"):
         answer_callback_query(cq_id)
         cid = data.split(":", 1)[1]
@@ -3450,6 +3521,25 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         set_signature_emoji(custom_emoji_id, placeholder or "✨")
         send_message(chat_id, f"✅ Bot imzosi o'rnatildi (ID: {custom_emoji_id}). "
                               f"Endi shu bilan yuboraman:", decoration_key="mbe2dfffc", reply_markup=back_to_menu_keyboard())
+        return True
+
+    if action == "post_channel_text":
+        clear_pending_input(user_id)
+        data = pending.get("data") or {}
+        channel_id = data.get("channel_id")
+        channel_title = data.get("channel_title", channel_id)
+        if not channel_id:
+            send_message(chat_id, "Kanal aniqlanmadi.", reply_markup=back_to_panel_keyboard())
+            return True
+        final_text, post_entities = build_post_entities_from_brackets(text)
+        if not final_text.strip():
+            send_message(chat_id, "Bo'sh matn.", reply_markup=back_to_panel_keyboard())
+            return True
+        result = send_message(channel_id, final_text, entities=post_entities or None, add_signature=False)
+        if result and result.get("ok"):
+            send_message(chat_id, f"Yuborildi: {channel_title}", reply_markup=back_to_panel_keyboard())
+        else:
+            send_message(chat_id, "Xato yuz berdi.", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "bioclock_template":
