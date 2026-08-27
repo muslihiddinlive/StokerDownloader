@@ -804,6 +804,9 @@ def get_limit_config():
         cfg.setdefault("reaction_emoji", DEFAULT_REACTION_EMOJI)
         cfg.setdefault("superadmin_reaction_emoji", DEFAULT_REACTION_EMOJI)
         cfg.setdefault("channel_reaction_emoji", DEFAULT_REACTION_EMOJI)
+        cfg.setdefault("premium_price_stars", 300)
+        cfg.setdefault("premium_days", 182)
+        cfg.setdefault("stars_per_limit", 1)  # 1 Star = shuncha ta limit
         return dict(cfg)
 
 
@@ -1027,6 +1030,13 @@ def set_weekly_cap(value):
     with _state_lock:
         STATE.setdefault("config", {})["weekly_cap"] = value
         save_state_locked()
+
+
+def set_config_value(key, value):
+    with _state_lock:
+        STATE.setdefault("config", {})[key] = value
+        save_state_locked()
+        _flush_state_now_locked()  # narx/limit sozlamasi — kutmasdan darhol yoziladi
 
 
 def get_force_channels():
@@ -1295,7 +1305,9 @@ def owner_replied_since(owner_id, chat_id, since_ts):
         return bool(ts and ts > since_ts)
 
 
-def grant_premium(user_id, days=182):
+def grant_premium(user_id, days=None):
+    if days is None:
+        days = get_limit_config()["premium_days"]
     with _state_lock:
         record = get_user_record(user_id)
         now = datetime.now(timezone.utc).timestamp()
@@ -2435,6 +2447,38 @@ def build_help_text(user_id):
 
 # ---------- Callback query handler ----------
 
+def _render_limits_panel_text_and_keyboard():
+    cfg = get_limit_config()
+    months = round(cfg["premium_days"] / 30.4, 1)
+    text = (
+        f"⚙️ <b>Limit va narx sozlamalari</b>\n\n"
+        f"Bazaviy haftalik: {cfg['base_weekly']}\n"
+        f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
+        f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n\n"
+        f"⭐ Premium narxi: {cfg['premium_price_stars']} Stars ({months} oy)\n"
+        f"➕ Stars→limit nisbati: 1 Star = {cfg['stars_per_limit']} limit\n"
+    )
+    keyboard = {"inline_keyboard": [
+        [
+            {"text": "Bazaviy −1", "callback_data": "limit_base_dec"},
+            {"text": "Bazaviy +1", "callback_data": "limit_base_inc"},
+        ],
+        [
+            {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
+            {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
+        ],
+        [
+            {"text": "Kalit −1", "callback_data": "limit_kw_dec"},
+            {"text": "Kalit +1", "callback_data": "limit_kw_inc"},
+        ],
+        [{"text": "✏️ Premium narxini o'zgartirish", "callback_data": "edit_premium_price"}],
+        [{"text": "✏️ Premium muddatini o'zgartirish (kun)", "callback_data": "edit_premium_days"}],
+        [{"text": "✏️ Stars→limit nisbatini o'zgartirish", "callback_data": "edit_stars_ratio"}],
+        [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
+    ]}
+    return text, keyboard
+
+
 def handle_callback_query(cq):
     cq_id = cq["id"]
     data = cq.get("data", "")
@@ -2512,6 +2556,11 @@ def handle_callback_query(cq):
 
     if data == "menu_premium":
         answer_callback_query(cq_id)
+        cfg = get_limit_config()
+        price = cfg["premium_price_stars"]
+        days = cfg["premium_days"]
+        months = round(days / 30.4, 1)
+        ratio = cfg["stars_per_limit"]
         if is_premium(user_id):
             record = get_user_record(user_id)
             until = datetime.fromtimestamp(record["premium_until"], tz=timezone.utc).strftime("%Y-%m-%d")
@@ -2519,11 +2568,12 @@ def handle_callback_query(cq):
                                f"⭐ Sizda premium allaqachon faol — {until} sanagacha cheksiz foydalanasiz.",
                                reply_markup=back_to_menu_keyboard())
         else:
-            text = ("⭐ <b>Premium</b>\n\nPremium bilan kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
-                    "(6 oy muddatga, Telegram Stars orqali).\n\n"
-                    "Yoki xohlagan miqdorda Stars to'lab, aynan shuncha (1 Star = 1 limit) qo'shimcha limit sotib olishingiz mumkin.")
+            text = (f"⭐ <b>Premium</b>\n\nPremium bilan kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
+                    f"({months} oy muddatga, Telegram Stars orqali).\n\n"
+                    f"Yoki xohlagan miqdorda Stars to'lab, {ratio} Star = {ratio} limit nisbatida "
+                    f"qo'shimcha limit sotib olishingiz mumkin.")
             keyboard = {"inline_keyboard": [
-                [{"text": "⭐ 300 Stars — Premium (6 oy, cheksiz)", "callback_data": "buy_premium"}],
+                [{"text": f"⭐ {price} Stars — Premium ({months} oy, cheksiz)", "callback_data": "buy_premium"}],
                 [{"text": "➕ Istagan miqdorda limit sotib olish", "callback_data": "buy_limit_custom"}],
                 [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
             ]}
@@ -2532,21 +2582,27 @@ def handle_callback_query(cq):
 
     if data == "buy_premium":
         answer_callback_query(cq_id)
+        cfg = get_limit_config()
+        price = cfg["premium_price_stars"]
+        days = cfg["premium_days"]
+        months = round(days / 30.4, 1)
         tg_call(
-            "sendInvoice", chat_id=chat_id, title="StokerDownloader Premium (6 oy)",
-            description="Cheksiz pack yuklab olish, kunlik/haftalik limitlarsiz — 6 oy muddatga.",
-            payload=f"premium_182:{user_id}", provider_token="", currency="XTR",
-            prices=[{"label": "Premium 6 oy", "amount": 300}],
+            "sendInvoice", chat_id=chat_id, title=f"StokerDownloader Premium ({months} oy)",
+            description=f"Cheksiz pack yuklab olish, kunlik/haftalik limitlarsiz — {months} oy muddatga.",
+            payload=f"premium:{user_id}", provider_token="", currency="XTR",
+            prices=[{"label": f"Premium {months} oy", "amount": price}],
         )
         return
 
     if data == "buy_limit_custom":
         answer_callback_query(cq_id)
+        cfg = get_limit_config()
+        ratio = cfg["stars_per_limit"]
         set_pending_input(user_id, "buy_limit_amount", {})
         safe_edit_or_send(
             chat_id, message_id,
-            "Nechta Star to'lamoqchisiz? Shuncha son limitingizga qo'shiladi "
-            "(1 dan 10000 gacha, masalan: 50):",
+            f"Nechta Star to'lamoqchisiz? Har bir Star uchun {ratio} ta limit qo'shiladi "
+            f"(1 dan 10000 gacha, masalan: 50):",
             reply_markup=back_to_menu_keyboard(),
         )
         return
@@ -3222,28 +3278,7 @@ def handle_callback_query(cq):
         answer_callback_query(cq_id)
         if user_id != SUPERADMIN_ID:
             return
-        cfg = get_limit_config()
-        text = (
-            f"⚙️ <b>Limit sozlamalari</b>\n\n"
-            f"Bazaviy haftalik: {cfg['base_weekly']}\n"
-            f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
-            f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n"
-        )
-        keyboard = {"inline_keyboard": [
-            [
-                {"text": "Bazaviy −1", "callback_data": "limit_base_dec"},
-                {"text": "Bazaviy +1", "callback_data": "limit_base_inc"},
-            ],
-            [
-                {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
-                {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
-            ],
-            [
-                {"text": "Kalit −1", "callback_data": "limit_kw_dec"},
-                {"text": "Kalit +1", "callback_data": "limit_kw_inc"},
-            ],
-            [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
-        ]}
+        text, keyboard = _render_limits_panel_text_and_keyboard()
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
@@ -3348,31 +3383,8 @@ def handle_callback_query(cq):
         cfg = get_limit_config()
         current = cfg.get("keyword_free_limit", 2)
         new_val = max(0, current - 1) if data == "limit_kw_dec" else current + 1
-        with _state_lock:
-            STATE.setdefault("config", {})["keyword_free_limit"] = new_val
-            save_state_locked()
-        cfg = get_limit_config()
-        text = (
-            f"⚙️ <b>Limit sozlamalari</b>\n\n"
-            f"Bazaviy haftalik: {cfg['base_weekly']}\n"
-            f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
-            f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n"
-        )
-        keyboard = {"inline_keyboard": [
-            [
-                {"text": "Bazaviy −1", "callback_data": "limit_base_dec"},
-                {"text": "Bazaviy +1", "callback_data": "limit_base_inc"},
-            ],
-            [
-                {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
-                {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
-            ],
-            [
-                {"text": "Kalit −1", "callback_data": "limit_kw_dec"},
-                {"text": "Kalit +1", "callback_data": "limit_kw_inc"},
-            ],
-            [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
-        ]}
+        set_config_value("keyword_free_limit", new_val)
+        text, keyboard = _render_limits_panel_text_and_keyboard()
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
@@ -3389,29 +3401,35 @@ def handle_callback_query(cq):
             set_weekly_cap(max(1, cfg["weekly_cap"] - 1))
         elif data == "limit_cap_inc":
             set_weekly_cap(cfg["weekly_cap"] + 1)
-        cfg = get_limit_config()
-        text = (
-            f"⚙️ <b>Limit sozlamalari</b>\n\n"
-            f"Bazaviy haftalik: {cfg['base_weekly']}\n"
-            f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
-            f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n"
-        )
-        keyboard = {"inline_keyboard": [
-            [
-                {"text": "Bazaviy −1", "callback_data": "limit_base_dec"},
-                {"text": "Bazaviy +1", "callback_data": "limit_base_inc"},
-            ],
-            [
-                {"text": "Chegara −1", "callback_data": "limit_cap_dec"},
-                {"text": "Chegara +1", "callback_data": "limit_cap_inc"},
-            ],
-            [
-                {"text": "Kalit −1", "callback_data": "limit_kw_dec"},
-                {"text": "Kalit +1", "callback_data": "limit_kw_inc"},
-            ],
-            [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
-        ]}
+        text, keyboard = _render_limits_panel_text_and_keyboard()
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data == "edit_premium_price":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "edit_premium_price", {})
+        safe_edit_or_send(chat_id, message_id, "Yangi Premium narxini Stars'da kiriting (masalan: 300):",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data == "edit_premium_days":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "edit_premium_days", {})
+        safe_edit_or_send(chat_id, message_id, "Yangi Premium muddatini kunlarda kiriting (masalan: 182):",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data == "edit_stars_ratio":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "edit_stars_ratio", {})
+        safe_edit_or_send(chat_id, message_id, "1 Star necha limitga teng bo'lsin? Butun son kiriting (masalan: 1):",
+                           reply_markup=back_to_panel_keyboard())
         return
 
     if data == "panel_admins":
@@ -3897,12 +3915,63 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         if amount < 1 or amount > 10000:
             send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
             return True
+        cfg = get_limit_config()
+        ratio = cfg["stars_per_limit"]
+        gained = amount * ratio
         tg_call(
-            "sendInvoice", chat_id=chat_id, title=f"{amount} ta qo'shimcha limit",
-            description=f"{amount} Stars to'lab, {amount} ta qo'shimcha so'rov limiti olasiz (bir martalik, bonus sifatida qo'shiladi).",
+            "sendInvoice", chat_id=chat_id, title=f"{gained} ta qo'shimcha limit",
+            description=f"{amount} Stars to'lab, {gained} ta qo'shimcha so'rov limiti olasiz (bir martalik, bonus sifatida qo'shiladi).",
             payload=f"buy_limit:{amount}:{user_id}", provider_token="", currency="XTR",
-            prices=[{"label": f"{amount} ta limit", "amount": amount}],
+            prices=[{"label": f"{gained} ta limit", "amount": amount}],
         )
+        return True
+
+    if action == "edit_premium_price":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        try:
+            value = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        if value < 1 or value > 10000:
+            send_message(chat_id, "1 dan 10000 gacha son kiriting (Bot API cheklovi). Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        set_config_value("premium_price_stars", value)
+        send_message(chat_id, f"✅ Premium narxi endi {value} Stars.", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "edit_premium_days":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        try:
+            value = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        if value < 1:
+            send_message(chat_id, "1 dan katta son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        set_config_value("premium_days", value)
+        send_message(chat_id, f"✅ Premium muddati endi {value} kun.", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "edit_stars_ratio":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        try:
+            value = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        if value < 1:
+            send_message(chat_id, "1 dan katta son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        set_config_value("stars_per_limit", value)
+        send_message(chat_id, f"✅ Endi 1 Star = {value} limit.", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "add_admin":
@@ -4494,7 +4563,7 @@ def webhook():
     if pre_checkout_query:
         payer_id = pre_checkout_query["from"]["id"]
         payload = pre_checkout_query.get("invoice_payload", "")
-        if not (payload.startswith("premium_182:") or payload.startswith("buy_limit:")):
+        if not (payload.startswith("premium:") or payload.startswith("buy_limit:")):
             tg_call("answerPreCheckoutQuery", pre_checkout_query_id=pre_checkout_query["id"],
                      ok=False, error_message="Noma'lum buyurtma. Qaytadan urinib ko'ring.")
             return {"ok": True}
@@ -4509,36 +4578,39 @@ def webhook():
     if successful_payment:
         payer_id = msg["from"]["id"]
         payload = successful_payment.get("invoice_payload", "")
-        # DIQQAT: haqiqiy to'langan miqdorni har doim Telegram yuborgan
-        # total_amount'dan olamiz, payload ichidagi raqamdan emas — bu
-        # ishonchliroq, chunki total_amount to'g'ridan-to'g'ri Telegram
-        # tomonidan tasdiqlangan, payload esa faqat bizning ichki belgimiz.
+        # DIQQAT: haqiqiy to'langan Stars miqdorini har doim Telegram
+        # yuborgan total_amount'dan olamiz, payload ichidagi raqamdan
+        # emas — bu ishonchliroq, chunki total_amount to'g'ridan-to'g'ri
+        # Telegram tomonidan tasdiqlangan, payload esa faqat bizning
+        # ichki belgimiz.
         total_amount = successful_payment.get("total_amount", 0)
 
         if payload.startswith("buy_limit:"):
+            cfg = get_limit_config()
+            gained = total_amount * cfg["stars_per_limit"]
             # PUL MASALASI: xatolik jim qolib ketmasligi kerak (pastdagi
-            # premium_182 shoxobchasidagi izohga qarang — bu yerda ham xuddi
+            # premium shoxobchasidagi izohga qarang — bu yerda ham xuddi
             # shunday tavakkal bor).
             try:
-                mode, new_limit = add_bonus_to_user(payer_id, total_amount)
+                mode, new_limit = add_bonus_to_user(payer_id, gained)
                 period = "kunlik" if mode == "daily" else "haftalik"
                 send_message(msg["chat"]["id"],
-                              f"🎉 {total_amount} ta limit qo'shildi! Yangi {period} limitingiz: {new_limit} ta.",
+                              f"🎉 {gained} ta limit qo'shildi! Yangi {period} limitingiz: {new_limit} ta.",
                               decoration_key="m3da8a391")
-                notify_admin(f"⭐ id:{payer_id} {total_amount} Stars to'lab, {total_amount} ta limit sotib oldi.")
+                notify_admin(f"⭐ id:{payer_id} {total_amount} Stars to'lab, {gained} ta limit sotib oldi.")
             except Exception as e:
                 log.exception("To'lovdan keyin limit qo'shishda xato: %s", e)
                 notify_admin(
                     f"🔥🔥 KRITIK: to'lov qabul qilindi (id:{payer_id}, "
                     f"{total_amount} Stars, payload={payload!r}), lekin limit qo'shishda xato: {e}\n"
-                    f"QO'LDA TEKSHIRING va foydalanuvchiga limit bering!"
+                    f"QO'LDA TEKSHIRING va foydalanuvchiga {gained} ta limit bering!"
                 )
             return {"ok": True}
 
         # Payload tekshiriladi — kelajakda boshqa turdagi to'lov (invoice)
-        # qo'shilsa, faqat "premium_182:" bilan boshlanadigan to'lovlar
+        # qo'shilsa, faqat "premium:" bilan boshlanadigan to'lovlar
         # uchun Premium berilishi kerak, boshqasiga emas.
-        if not payload.startswith("premium_182:"):
+        if not payload.startswith("premium:"):
             log.warning("Noma'lum payload bilan to'lov keldi: %r (payer=%s)", payload, payer_id)
             notify_admin(f"⚠️ Noma'lum to'lov payload: {payload!r}, payer id:{payer_id}. Qo'lda tekshiring!")
             return {"ok": True}
@@ -4548,7 +4620,7 @@ def webhook():
         # yubormasligi) kerak — aks holda "pul ketdi, Premium kelmadi"
         # holati yuzaga kelishi mumkin va admin bundan bexabar qoladi.
         try:
-            until_ts = grant_premium(payer_id, days=182)
+            until_ts = grant_premium(payer_id)
             until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
             send_message(msg["chat"]["id"], f"🎉 Premium faollashtirildi! {until_str} sanagacha cheksiz foydalanasiz.", decoration_key="m3da8a391")
             notify_admin(f"⭐ Yangi premium xarid: id:{payer_id}, {until_str} gacha")
