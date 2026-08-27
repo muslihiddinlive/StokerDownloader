@@ -4344,6 +4344,12 @@ def webhook():
 
     pre_checkout_query = update.get("pre_checkout_query")
     if pre_checkout_query:
+        payer_id = pre_checkout_query["from"]["id"]
+        payload = pre_checkout_query.get("invoice_payload", "")
+        if not payload.startswith("premium_182:"):
+            tg_call("answerPreCheckoutQuery", pre_checkout_query_id=pre_checkout_query["id"],
+                     ok=False, error_message="Noma'lum buyurtma. Qaytadan urinib ko'ring.")
+            return {"ok": True}
         tg_call("answerPreCheckoutQuery", pre_checkout_query_id=pre_checkout_query["id"], ok=True)
         return {"ok": True}
 
@@ -4354,10 +4360,31 @@ def webhook():
     successful_payment = msg.get("successful_payment")
     if successful_payment:
         payer_id = msg["from"]["id"]
-        until_ts = grant_premium(payer_id, days=182)
-        until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-        send_message(msg["chat"]["id"], f"🎉 Premium faollashtirildi! {until_str} sanagacha cheksiz foydalanasiz.", decoration_key="m3da8a391")
-        notify_admin(f"⭐ Yangi premium xarid: id:{payer_id}, {until_str} gacha")
+        payload = successful_payment.get("invoice_payload", "")
+        # Payload tekshiriladi — kelajakda boshqa turdagi to'lov (invoice)
+        # qo'shilsa, faqat "premium_182:" bilan boshlanadigan to'lovlar
+        # uchun Premium berilishi kerak, boshqasiga emas.
+        if not payload.startswith("premium_182:"):
+            log.warning("Noma'lum payload bilan to'lov keldi: %r (payer=%s)", payload, payer_id)
+            notify_admin(f"⚠️ Noma'lum to'lov payload: {payload!r}, payer id:{payer_id}. Qo'lda tekshiring!")
+            return {"ok": True}
+        # PUL MASALASI: foydalanuvchi allaqachon to'lagan, shuning uchun bu
+        # yerda hech qanday xatolik jim qolib ketmasligi (yoki webhook'ni
+        # 500 bilan yiqitib, Telegram'ni qayta-qayta retry qildirib
+        # yubormasligi) kerak — aks holda "pul ketdi, Premium kelmadi"
+        # holati yuzaga kelishi mumkin va admin bundan bexabar qoladi.
+        try:
+            until_ts = grant_premium(payer_id, days=182)
+            until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            send_message(msg["chat"]["id"], f"🎉 Premium faollashtirildi! {until_str} sanagacha cheksiz foydalanasiz.", decoration_key="m3da8a391")
+            notify_admin(f"⭐ Yangi premium xarid: id:{payer_id}, {until_str} gacha")
+        except Exception as e:
+            log.exception("To'lovdan keyin Premium berishda xato: %s", e)
+            notify_admin(
+                f"🔥🔥 KRITIK: to'lov qabul qilindi (id:{payer_id}, "
+                f"payload={payload!r}), lekin Premium berishda xato: {e}\n"
+                f"QO'LDA TEKSHIRING va foydalanuvchiga Premium bering!"
+            )
         return {"ok": True}
 
     chat_id = msg["chat"]["id"]
