@@ -2520,9 +2520,11 @@ def handle_callback_query(cq):
                                reply_markup=back_to_menu_keyboard())
         else:
             text = ("⭐ <b>Premium</b>\n\nPremium bilan kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
-                    "(6 oy muddatga, Telegram Stars orqali).")
+                    "(6 oy muddatga, Telegram Stars orqali).\n\n"
+                    "Yoki xohlagan miqdorda Stars to'lab, aynan shuncha (1 Star = 1 limit) qo'shimcha limit sotib olishingiz mumkin.")
             keyboard = {"inline_keyboard": [
-                [{"text": "⭐ 100 Stars uchun sotib olish", "callback_data": "buy_premium"}],
+                [{"text": "⭐ 300 Stars — Premium (6 oy, cheksiz)", "callback_data": "buy_premium"}],
+                [{"text": "➕ Istagan miqdorda limit sotib olish", "callback_data": "buy_limit_custom"}],
                 [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
             ]}
             safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
@@ -2534,7 +2536,18 @@ def handle_callback_query(cq):
             "sendInvoice", chat_id=chat_id, title="StokerDownloader Premium (6 oy)",
             description="Cheksiz pack yuklab olish, kunlik/haftalik limitlarsiz — 6 oy muddatga.",
             payload=f"premium_182:{user_id}", provider_token="", currency="XTR",
-            prices=[{"label": "Premium 6 oy", "amount": 100}],
+            prices=[{"label": "Premium 6 oy", "amount": 300}],
+        )
+        return
+
+    if data == "buy_limit_custom":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "buy_limit_amount", {})
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Nechta Star to'lamoqchisiz? Shuncha son limitingizga qo'shiladi "
+            "(1 dan 10000 gacha, masalan: 50):",
+            reply_markup=back_to_menu_keyboard(),
         )
         return
 
@@ -3874,6 +3887,24 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                      reply_markup=back_to_panel_keyboard())
         return True
 
+    if action == "buy_limit_amount":
+        clear_pending_input(user_id)
+        try:
+            amount = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+            return True
+        if amount < 1 or amount > 10000:
+            send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+            return True
+        tg_call(
+            "sendInvoice", chat_id=chat_id, title=f"{amount} ta qo'shimcha limit",
+            description=f"{amount} Stars to'lab, {amount} ta qo'shimcha so'rov limiti olasiz (bir martalik, bonus sifatida qo'shiladi).",
+            payload=f"buy_limit:{amount}:{user_id}", provider_token="", currency="XTR",
+            prices=[{"label": f"{amount} ta limit", "amount": amount}],
+        )
+        return True
+
     if action == "add_admin":
         clear_pending_input(user_id)
         if user_id != SUPERADMIN_ID:
@@ -4463,7 +4494,7 @@ def webhook():
     if pre_checkout_query:
         payer_id = pre_checkout_query["from"]["id"]
         payload = pre_checkout_query.get("invoice_payload", "")
-        if not payload.startswith("premium_182:"):
+        if not (payload.startswith("premium_182:") or payload.startswith("buy_limit:")):
             tg_call("answerPreCheckoutQuery", pre_checkout_query_id=pre_checkout_query["id"],
                      ok=False, error_message="Noma'lum buyurtma. Qaytadan urinib ko'ring.")
             return {"ok": True}
@@ -4478,6 +4509,32 @@ def webhook():
     if successful_payment:
         payer_id = msg["from"]["id"]
         payload = successful_payment.get("invoice_payload", "")
+        # DIQQAT: haqiqiy to'langan miqdorni har doim Telegram yuborgan
+        # total_amount'dan olamiz, payload ichidagi raqamdan emas — bu
+        # ishonchliroq, chunki total_amount to'g'ridan-to'g'ri Telegram
+        # tomonidan tasdiqlangan, payload esa faqat bizning ichki belgimiz.
+        total_amount = successful_payment.get("total_amount", 0)
+
+        if payload.startswith("buy_limit:"):
+            # PUL MASALASI: xatolik jim qolib ketmasligi kerak (pastdagi
+            # premium_182 shoxobchasidagi izohga qarang — bu yerda ham xuddi
+            # shunday tavakkal bor).
+            try:
+                mode, new_limit = add_bonus_to_user(payer_id, total_amount)
+                period = "kunlik" if mode == "daily" else "haftalik"
+                send_message(msg["chat"]["id"],
+                              f"🎉 {total_amount} ta limit qo'shildi! Yangi {period} limitingiz: {new_limit} ta.",
+                              decoration_key="m3da8a391")
+                notify_admin(f"⭐ id:{payer_id} {total_amount} Stars to'lab, {total_amount} ta limit sotib oldi.")
+            except Exception as e:
+                log.exception("To'lovdan keyin limit qo'shishda xato: %s", e)
+                notify_admin(
+                    f"🔥🔥 KRITIK: to'lov qabul qilindi (id:{payer_id}, "
+                    f"{total_amount} Stars, payload={payload!r}), lekin limit qo'shishda xato: {e}\n"
+                    f"QO'LDA TEKSHIRING va foydalanuvchiga limit bering!"
+                )
+            return {"ok": True}
+
         # Payload tekshiriladi — kelajakda boshqa turdagi to'lov (invoice)
         # qo'shilsa, faqat "premium_182:" bilan boshlanadigan to'lovlar
         # uchun Premium berilishi kerak, boshqasiga emas.
