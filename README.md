@@ -46,3 +46,14 @@ Render Start Command'da bitta worker ishlatilishi kerak (state xotirada saqlanad
 ```
 gunicorn sticker_bot_webhook:app --workers 1
 ```
+
+⚠️ **`--workers 1` dan ORTIQ ishlatmang.** Har bir worker o'zining alohida
+xotira (RAM) nusxasiga ega bo'ladi — 2+ worker bilan ishga tushirilsa,
+foydalanuvchi limitlari, bonuslar va boshqa state ma'lumotlari **jimgina
+yo'qolishi yoki eskirishi mumkin** (workerlar bir-birining yozganini
+ko'rmaydi, oxirgi saqlagan worker g'olib chiqadi). Xato hech qanday log
+yoki bildirishnoma bermaydi — shuning uchun bu talab qat'iy.
+
+State endi debounce (2 soniyalik) bilan saqlanadi — tez ketma-ket kelgan
+o'zgarishlar bitta yozuvga birlashadi. Kritik amallar (admin qo'shish,
+bonus/premium berish) esa kutmasdan darhol yoziladi.

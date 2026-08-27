@@ -53,6 +53,7 @@ import json
 import html
 import time
 import uuid
+import atexit
 import zipfile
 import hashlib
 import logging
@@ -251,6 +252,7 @@ app = Flask(__name__)
 BOT_ID = None
 BOT_USERNAME = None
 _pinned_message_id = None
+_state_dirty = False  # save_state_locked() True qiladi; flusher thread yozib False qiladi
 
 # Barcha STATE (persistent, guruhga pinned JSON orqali saqlanadi) ni
 # o'qish/yozish shu RLock ostida bajariladi. RLock chunki ba'zi funksiyalar
@@ -720,15 +722,26 @@ def _upload_state_document(method_extra_fields=None, message_id=None):
 
 
 def save_state_locked():
-    """_state_lock ALLAQACHON ushlanган holatda chaqirilishi kerak.
-    STATE'ni pinlangan JSON FAYL (document) sifatida DB guruhga saqlaydi —
-    matnli xabardagi 4096 belgi chegarasidan xoli, ma'lumot qancha katta
-    bo'lmasin ishlayveradi."""
-    global _pinned_message_id
+    """_state_lock ALLAQACHON ushlangan holatda chaqirilishi kerak.
+    DIQQAT: bu funksiya endi Telegramga DARHOL yozmaydi — faqat STATE'ni
+    'dirty' (o'zgargan) deb belgilaydi. Haqiqiy yozish fonda ishlaydigan
+    _state_flusher_loop orqali debounce qilinib (SAVE_DEBOUNCE_SECONDS
+    oralig'ida bittalashtirilib) amalga oshiriladi. Bu bir nechta ketma-ket
+    tez o'zgarishlarni (masalan parallel so'rovlar) bitta HTTP yozuvga
+    birlashtiradi va botni sezilarli tezlashtiradi."""
+    global _state_dirty
+    _state_dirty = True
+
+
+def _flush_state_now_locked():
+    """STATE'ni HAQIQATDA Telegramga yozadi. _state_lock ALLAQACHON
+    ushlangan holatda chaqirilishi kerak."""
+    global _pinned_message_id, _state_dirty
     if _pinned_message_id:
         ok, result = _upload_state_document(message_id=_pinned_message_id)
         if ok:
             log.info("STATE saqlandi (edit, message_id=%s)", _pinned_message_id)
+            _state_dirty = False
             return
         log.warning("editMessageMedia muvaffaqiyatsiz (%s), yangi fayl yuboriladi.", result)
 
@@ -737,8 +750,36 @@ def save_state_locked():
         _pinned_message_id = result["result"]["message_id"]
         tg_call("pinChatMessage", chat_id=DB_GROUP_ID, message_id=_pinned_message_id, disable_notification=True)
         log.info("STATE saqlandi (yangi fayl, message_id=%s)", _pinned_message_id)
+        _state_dirty = False
     else:
         log.error("STATE saqlashda xato: %s", result)
+        # _state_dirty=True qoladi — keyingi flush urinishida qayta uriniladi.
+
+
+SAVE_DEBOUNCE_SECONDS = 2.0
+
+
+def _state_flusher_loop():
+    """Fon thread: har SAVE_DEBOUNCE_SECONDS da bir marta, agar STATE
+    o'zgargan bo'lsa (dirty), uni Telegramga yozadi. Shu tarzda bir necha
+    o'nlab tez ketma-ket o'zgarish bitta HTTP yozuvga birlashadi."""
+    while True:
+        time.sleep(SAVE_DEBOUNCE_SECONDS)
+        try:
+            with _state_lock:
+                if _state_dirty:
+                    _flush_state_now_locked()
+        except Exception as e:
+            log.exception("State flusher xatosi: %s", e)
+
+
+def force_flush_state():
+    """STATE o'zgargan bo'lsa, kutmasdan DARHOL yozadi. Superadmin
+    panelidan chiqishdan oldin yoki kritik amallardan keyin ishlatiladi —
+    masalan foydalanuvchiga darhol ko'rinishi kerak bo'lgan holatlarda."""
+    with _state_lock:
+        if _state_dirty:
+            _flush_state_now_locked()
 
 
 def save_state():
@@ -1262,6 +1303,7 @@ def grant_premium(user_id, days=182):
         base = max(now, current_until)
         record["premium_until"] = base + days * 86400
         save_state_locked()
+        _flush_state_now_locked()  # to'lov/premium — kutmasdan darhol yoziladi
         return record["premium_until"]
 
 
@@ -1307,20 +1349,47 @@ def limit_period_label(mode):
 
 
 def can_make_request(user_id):
-    if is_admin(user_id) or is_premium(user_id):
+    """ATOMIC: tekshirish VA joy band qilish bitta lock ostida bajariladi
+    (avval bular alohida edi — ikki parallel so'rov orasida limitdan
+    oshib ketish (race condition) mumkin edi). Ruxsat berilsa, count
+    DARHOL +1 qilinadi ('reserve'). Agar so'rov keyinchalik muvaffaqiyatsiz
+    tugasa (masalan pack topilmasa), chaqiruvchi shart release_request_slot()
+    ni chaqirib bandlikni bekor qilishi kerak — aks holda foydalanuvchi
+    muvaffaqiyatsiz urinish uchun ham limitidan yeb qo'yadi."""
+    with _state_lock:
+        if is_admin(user_id) or is_premium(user_id):
+            return True, None
+        record = get_user_record(user_id)
+        mode, limit = ensure_period_reset(user_id)
+        if record["count"] >= limit:
+            period = "kunlik" if mode == "daily" else "haftalik"
+            return False, (
+                f"{period.capitalize()} limitingiz tugadi ({limit}/{limit}, {limit_period_label(mode)}).\n"
+                f"Limitni oshirish uchun referal havolangiz orqali do'stlaringizni taklif qiling."
+            )
+        record["count"] += 1
+        save_state_locked()
         return True, None
-    record = get_user_record(user_id)
-    mode, limit = ensure_period_reset(user_id)
-    if record["count"] >= limit:
-        period = "kunlik" if mode == "daily" else "haftalik"
-        return False, (
-            f"{period.capitalize()} limitingiz tugadi ({limit}/{limit}, {limit_period_label(mode)}).\n"
-            f"Limitni oshirish uchun referal havolangiz orqali do'stlaringizni taklif qiling."
-        )
-    return True, None
+
+
+def release_request_slot(user_id):
+    """can_make_request() band qilgan joyni bekor qiladi — so'rov
+    keyinchalik muvaffaqiyatsiz tugagan hollarda (pack topilmadi,
+    yuborishda xato va h.k.) chaqirilishi kerak, aks holda foydalanuvchi
+    behuda limitidan yutqazadi."""
+    with _state_lock:
+        if is_admin(user_id) or is_premium(user_id):
+            return
+        record = get_user_record(user_id)
+        if record["count"] > 0:
+            record["count"] -= 1
+        save_state_locked()
 
 
 def register_request(user_id, kind=None, detail=None):
+    """DIQQAT: count endi bu yerda emas, can_make_request() ichida
+    atomic tarzda oshiriladi (race condition oldini olish uchun).
+    Bu funksiya faqat statistika/tarixni yozadi."""
     with _state_lock:
         record = get_user_record(user_id)
         record["lifetime_requests"] = record.get("lifetime_requests", 0) + 1
@@ -1336,11 +1405,6 @@ def register_request(user_id, kind=None, detail=None):
                 del history[: len(history) - 50]
         stats = STATE.setdefault("stats", {"total_requests": 0})
         stats["total_requests"] = stats.get("total_requests", 0) + 1
-        if is_admin(user_id) or is_premium(user_id):
-            save_state_locked()
-            return
-        ensure_period_reset(user_id)
-        record["count"] += 1
         save_state_locked()
 
 
@@ -1405,6 +1469,7 @@ def add_bonus_to_user(user_id, amount):
         record["bonus"] = record.get("bonus", 0) + amount
         save_state_locked()
         mode, limit = ensure_period_reset(user_id)
+        _flush_state_now_locked()  # admin amali — kutmasdan darhol yoziladi
     return mode, limit
 
 
@@ -1413,6 +1478,7 @@ def add_admin(user_id):
         if user_id not in STATE["admins"]:
             STATE["admins"].append(user_id)
             save_state_locked()
+            _flush_state_now_locked()
     tg_call("deleteMyCommands", scope={"type": "chat", "chat_id": user_id})
 
 
@@ -1421,6 +1487,7 @@ def remove_admin(user_id):
         if user_id in STATE["admins"]:
             STATE["admins"].remove(user_id)
             save_state_locked()
+            _flush_state_now_locked()
 
 
 def add_force_channel(ch):
@@ -1500,17 +1567,20 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
         return
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
+        release_request_slot(requester_id)
         send_message(chat_id, "Pack topilmadi. Nomini/havolani tekshiring.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
     stickers = sticker_set.get("stickers", [])
     if index < 1 or index > len(stickers):
+        release_request_slot(requester_id)
         send_message(chat_id, f"Bu pack'da {len(stickers)} ta element bor. 1 dan {len(stickers)} gacha raqam kiriting.", decoration_key="mdb26262a",
                      reply_to=reply_to, business_connection_id=business_connection_id)
         return
     sticker = stickers[index - 1]
     file_path = get_file_path(sticker["file_id"])
     if not file_path:
+        release_request_slot(requester_id)
         send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
@@ -1611,6 +1681,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
 
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
+        release_request_slot(requester_id)
         send_message(chat_id, "Pack topilmadi. Nomini tekshiring.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: topilmadi")
@@ -1635,6 +1706,10 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
                         caption=f"{requester_info} so'ragan pack: {pack_name} (kesh)", decoration_key="c2f0992e5",
                     )
                 return
+            release_request_slot(requester_id)
+            send_message(chat_id, "Yuborishda xato yuz berdi. Qayta urinib ko'ring.", reply_to=reply_to,
+                         business_connection_id=business_connection_id)
+            return
         elif cached:
             with _state_lock:
                 get_pack_cache().pop(pack_name.lower(), None)
@@ -1642,6 +1717,7 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
 
     buf, result = process_pack(pack_name)
     if buf is None:
+        release_request_slot(requester_id)
         send_message(chat_id, result, reply_to=reply_to, business_connection_id=business_connection_id)
         notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: {result}")
         return
@@ -1775,6 +1851,7 @@ def _handle_multi_emoji_request_sync(chat_id, custom_emoji_ids, requester_info, 
         return
     stickers = get_custom_emoji_stickers_batch(custom_emoji_ids)
     if not stickers:
+        release_request_slot(requester_id)
         send_message(chat_id, "Bu emojilarni topib bo'lmadi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
@@ -1790,6 +1867,7 @@ def _handle_multi_emoji_request_sync(chat_id, custom_emoji_ids, requester_info, 
             if fname is not None and content is not None:
                 results[i] = (fname, content)
     if not results:
+        release_request_slot(requester_id)
         send_message(chat_id, "Fayllarni yuklab bo'lmadi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
@@ -1833,6 +1911,7 @@ def _handle_direct_file_id_request_sync(chat_id, file_id, requester_info, reques
         return
     file_path = get_file_path(file_id)
     if not file_path:
+        release_request_slot(requester_id)
         send_message(chat_id, "Bu ID bo'yicha fayl topilmadi (ID noto'g'ri yoki botga tegishli emas).",
                      reply_to=reply_to, business_connection_id=business_connection_id)
         return
@@ -2066,6 +2145,7 @@ def _handle_id_pack_request_sync(chat_id, pack_name, requester_info, requester_i
         return
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
+        release_request_slot(requester_id)
         send_message(chat_id, "Pack topilmadi. Nomini tekshiring.")
         notify_admin(f"⚠️ Muvaffaqiyatsiz ID so'rovi\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: topilmadi")
         return
@@ -2093,11 +2173,13 @@ def _handle_gif_webm_request_sync(chat_id, pending, requester_id):
         return
     file_path = get_file_path(pending["file_id"])
     if not file_path:
+        release_request_slot(requester_id)
         send_message(chat_id, "Faylni olishda xato yuz berdi.")
         return
     content = download_file_bytes(file_path)
     webm_bytes = convert_to_webm(content)
     if not webm_bytes:
+        release_request_slot(requester_id)
         send_message(chat_id, "GIF'ni webm'ga o'girishda xato yuz berdi. Qaytadan urinib ko'ring.")
         return
     register_request(requester_id, kind="gif_webm", detail="gif.webm")
@@ -2138,11 +2220,13 @@ def _handle_single_sticker_request_sync(chat_id, reply, requester_info, requeste
         return
     file_id, ext, emoji_char, kind, _ = extract_single_sticker_file(reply)
     if not file_id:
+        release_request_slot(requester_id)
         send_message(chat_id, "Bu xabarda sticker/custom emoji topilmadi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
     file_path = get_file_path(file_id)
     if not file_path:
+        release_request_slot(requester_id)
         send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
@@ -2171,6 +2255,7 @@ def _handle_single_sticker_request_from_pending_sync(chat_id, pending, requester
         return
     file_path = get_file_path(pending["file_id"])
     if not file_path:
+        release_request_slot(requester_id)
         send_message(chat_id, "Faylni olishda xato yuz berdi.")
         return
     content = download_file_bytes(file_path)
@@ -2201,11 +2286,13 @@ def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, r
         return
     file_id, ext = extract_animation_file(msg)
     if not file_id:
+        release_request_slot(requester_id)
         send_message(chat_id, "Bu xabarda GIF/animatsiya topilmadi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
     file_path = get_file_path(file_id)
     if not file_path:
+        release_request_slot(requester_id)
         send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to,
                      business_connection_id=business_connection_id)
         return
@@ -2836,6 +2923,10 @@ def handle_callback_query(cq):
         rec = get_user_record(target_id)
         counts = rec.get("type_counts", {}) or {}
         premium_label = "ha" if is_premium(target_id) else "yoq"
+        mode, limit = compute_user_limit(target_id)
+        period_label = "kunlik" if mode == "daily" else "haftalik"
+        used = rec.get("count", 0)
+        remaining = max(0, limit - used)
         text = (
             f"👤 <b>{user_label(target_id)}</b> (id:{target_id})\n\n"
             f"📊 Jami so'rovlar: {rec.get('lifetime_requests', 0)}\n"
@@ -2845,7 +2936,9 @@ def handle_callback_query(cq):
             f"📦 Pack: {counts.get('pack', 0)}\n\n"
             f"🔗 Referallar: {rec.get('referrals', 0)}\n"
             f"🎁 Bonus: {rec.get('bonus', 0)}\n"
-            f"⭐ Premium: {premium_label}\n"
+            f"⭐ Premium: {premium_label}\n\n"
+            f"📈 Joriy {period_label} limit: <b>{limit}</b> ta\n"
+            f"   (ishlatilgan: {used}, qolgan: {remaining})\n"
         )
         rows = [
             [
@@ -2894,9 +2987,14 @@ def handle_callback_query(cq):
         if user_id != SUPERADMIN_ID:
             return
         target_id = int(data.split(":", 1)[1])
+        _, current_limit = compute_user_limit(target_id)
         set_pending_input(user_id, "give_limit_amount", {"target_id": target_id})
-        safe_edit_or_send(chat_id, message_id, f"id:{target_id} uchun qo'shiladigan limit sonini yozing (masalan: 5):",
-                           reply_markup=back_to_panel_keyboard())
+        safe_edit_or_send(
+            chat_id, message_id,
+            f"id:{target_id} — joriy yakuniy limit: {current_limit} ta.\n"
+            f"Ustiga QO'SHILADIGAN (bonus) miqdorni yozing (masalan: 5):",
+            reply_markup=back_to_panel_keyboard(),
+        )
         return
 
     if data.startswith("panel_groups:"):
@@ -3999,6 +4097,8 @@ def _bio_clock_loop():
 
 
 threading.Thread(target=_bio_clock_loop, daemon=True).start()
+threading.Thread(target=_state_flusher_loop, daemon=True).start()
+atexit.register(force_flush_state)  # process to'xtaganda saqlanmagan o'zgarish yo'qolmasin
 
 
 def send_auto_reply(chat_id, text, entities, business_connection_id):
