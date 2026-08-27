@@ -2380,6 +2380,7 @@ def admin_panel_keyboard(user_id):
         ])
         rows.append([{"text": "✨ Bot imzosi (premium emoji)", "callback_data": "panel_signature"}])
         rows.append([{"text": "📤 Kanalga post (emoji bilan)", "callback_data": "panel_post_channel:0"}])
+        rows.append([{"text": "⭐ Stars balansi / Gift", "callback_data": "panel_stars"}])
         rows.append([
             {"text": "🏆 Referal reyting", "callback_data": "panel_leaderboard"},
             {"text": "📤 Eksport (CSV)", "callback_data": "panel_export"},
@@ -3233,6 +3234,100 @@ def handle_callback_query(cq):
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
+    if data == "panel_stars":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        balance_result = tg_call("getMyStarBalance")
+        if not balance_result or not balance_result.get("ok"):
+            safe_edit_or_send(chat_id, message_id, "⚠️ Star balansini olishda xato yuz berdi. Qayta urinib ko'ring.",
+                               reply_markup=back_to_panel_keyboard())
+            return
+        balance = balance_result["result"].get("amount", 0)
+
+        gifts_result = tg_call("getAvailableGifts")
+        text = f"⭐ <b>Bot Stars balansi:</b> {balance}\n\n"
+        rows = []
+        if gifts_result and gifts_result.get("ok"):
+            gifts = gifts_result["result"].get("gifts", [])
+            # faqat botning balansi yetadigan gift'larni ko'rsatamiz, eng
+            # arzonidan boshlab. Limited (soni cheklangan) gift'lar tugab
+            # qolishi mumkin (remaining_count=0) — bunday holda sendGift
+            # GIFT_INVALID xato beradi, shuning uchun ularni chiqarib
+            # tashlaymiz.
+            def _still_available(g):
+                if "remaining_count" in g and g.get("remaining_count") is not None:
+                    return g["remaining_count"] > 0
+                return True  # cheklanmagan (doimiy) gift
+
+            affordable = [
+                g for g in gifts
+                if g.get("star_count", 0) <= balance and _still_available(g)
+            ]
+            affordable.sort(key=lambda g: g.get("star_count", 0))
+            if not affordable:
+                text += "Hozircha balans hech qanday gift sotib olishga yetmaydi."
+            else:
+                text += "Quyidagilardan birini tanlang (kimga yuborishni keyin so'rayman):"
+                for g in affordable[:16]:
+                    rows.append([{
+                        "text": f"🎁 {g.get('star_count', 0)}⭐",
+                        "callback_data": f"stars_gift_pick:{g['id']}",
+                    }])
+        else:
+            text += "⚠️ Gift'lar ro'yxatini olishda xato yuz berdi."
+        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("stars_gift_pick:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        gift_id = data.split(":", 1)[1]
+        rows = [
+            [{"text": "🙋 O'zimga (superadmin)", "callback_data": f"stars_gift_send:{gift_id}:{SUPERADMIN_ID}"}],
+        ]
+        with _state_lock:
+            for admin_id in STATE.get("admins", []):
+                rows.append([{
+                    "text": f"👤 {user_label(admin_id)}",
+                    "callback_data": f"stars_gift_send:{gift_id}:{admin_id}",
+                }])
+        rows.append([{"text": "✍️ Boshqa ID kiritish", "callback_data": f"stars_gift_custom:{gift_id}"}])
+        rows.append([{"text": "⬅️ Orqaga", "callback_data": "panel_stars"}])
+        safe_edit_or_send(chat_id, message_id, "Bu gift'ni kimga yuboraman?", reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("stars_gift_custom:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        gift_id = data.split(":", 1)[1]
+        set_pending_input(user_id, "stars_gift_send_custom", {"gift_id": gift_id})
+        safe_edit_or_send(chat_id, message_id, "Qabul qiluvchining Telegram ID raqamini yuboring:",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data.startswith("stars_gift_send:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        _, gift_id, target_id = data.split(":", 2)
+        target_id = int(target_id)
+        result = tg_call("sendGift", user_id=target_id, gift_id=gift_id)
+        if result and result.get("ok"):
+            safe_edit_or_send(chat_id, message_id,
+                               f"✅ Gift muvaffaqiyatli yuborildi (id:{target_id}).\n"
+                               f"Qabul qiluvchi buni o'z Telegram profilida ko'radi va xohlasa "
+                               f"\"Stars'ga aylantirish\" orqali o'z Star balansiga o'tkazishi mumkin.",
+                               reply_markup=back_to_panel_keyboard())
+        else:
+            err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+            safe_edit_or_send(chat_id, message_id, f"⚠️ Gift yuborishda xato: {err}",
+                               reply_markup=back_to_panel_keyboard())
+        return
+
     if data in ("limit_kw_dec", "limit_kw_inc"):
         answer_callback_query(cq_id)
         if user_id != SUPERADMIN_ID:
@@ -3790,6 +3885,28 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             return True
         add_admin(target_id)
         send_message(chat_id, f"✅ id:{target_id} endi bot admini.", decoration_key="m57a14e3a", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "stars_gift_send_custom":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        gift_id = pending["data"]["gift_id"]
+        try:
+            target_id = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun ID kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        result = tg_call("sendGift", user_id=target_id, gift_id=gift_id)
+        if result and result.get("ok"):
+            send_message(chat_id,
+                          f"✅ Gift muvaffaqiyatli yuborildi (id:{target_id}).\n"
+                          f"Qabul qiluvchi buni o'z Telegram profilida ko'radi va xohlasa "
+                          f"\"Stars'ga aylantirish\" orqali o'z Star balansiga o'tkazishi mumkin.",
+                          reply_markup=back_to_panel_keyboard())
+        else:
+            err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+            send_message(chat_id, f"⚠️ Gift yuborishda xato: {err}", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "add_force_channel":
