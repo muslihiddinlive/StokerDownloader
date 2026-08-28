@@ -2107,6 +2107,121 @@ def send_pack_ids_sequential(chat_id, pack_name, sticker_set, business_connectio
         time.sleep(0.35)
 
 
+# ---------- ZIP -> yangi sticker/emoji pack publish qilish ----------
+
+STICKER_SET_MAX_ANIMATED = 50  # Bot API: regular animated/video to'plamlar ko'pi bilan 50 ta
+STICKER_SET_MAX_CUSTOM_EMOJI = 200  # custom_emoji turidagi to'plamlar ko'pi bilan 200 ta
+
+# Nomga ruxsat etilgan belgilar: lotin harflari, raqamlar, pastki chiziq.
+_STICKER_SET_NAME_SAFE_RE = re.compile(r"[^a-zA-Z0-9_]")
+
+
+def sanitize_sticker_set_name(raw_name, owner_id):
+    """Foydalanuvchi kiritgan nomni Telegram talab qiladigan formatga
+    keltiradi: faqat [a-zA-Z0-9_], '_by_<bot_username>' bilan tugaydi,
+    umumiy uzunlik <=64 belgi, lotin harfi bilan boshlanadi (raqam bilan
+    boshlansa oldiga 's' qo'shiladi)."""
+    base = _STICKER_SET_NAME_SAFE_RE.sub("", raw_name.strip())
+    if not base:
+        base = f"pack{owner_id}{int(time.time())}"
+    if base[0].isdigit():
+        base = "s" + base
+    suffix = f"_by_{BOT_USERNAME}"
+    max_base_len = 64 - len(suffix)
+    base = base[:max_base_len]
+    return base + suffix
+
+
+def upload_sticker_file(owner_user_id, filename, file_bytes, sticker_format):
+    """TGS/WEBM/WEBP faylni Telegram serveriga oldindan yuklaydi va
+    qayta ishlatsa bo'ladigan file_id qaytaradi. Xato bo'lsa None."""
+    files = {"sticker": (filename, file_bytes)}
+    payload = {"user_id": owner_user_id, "sticker_format": sticker_format}
+    try:
+        resp = _http_session.post(f"{API_BASE}/uploadStickerFile", data=payload, files=files, timeout=60)
+        data = resp.json()
+    except Exception as e:
+        log.error("uploadStickerFile xato: %s", e)
+        return None
+    if not data.get("ok"):
+        log.error("uploadStickerFile rad etildi: %s", data)
+        return None
+    return data["result"]["file_id"]
+
+
+def create_sticker_set_from_tgs(owner_user_id, name, title, tgs_items, emoji, sticker_type="regular"):
+    """tgs_items: [(filename, bytes), ...] — ketma-ket, birinchisi bilan
+    to'plam yaratiladi, qolganlari addStickerToSet bilan qo'shiladi.
+    Muvaffaqiyatli qo'shilgan sticker soni va xatolar ro'yxatini
+    qaytaradi: (created, added_count, errors)."""
+    errors = []
+    if not tgs_items:
+        return False, 0, ["TGS fayl topilmadi"]
+
+    max_count = STICKER_SET_MAX_CUSTOM_EMOJI if sticker_type == "custom_emoji" else STICKER_SET_MAX_ANIMATED
+    tgs_items = tgs_items[:max_count]
+
+    # Har bir faylni avval alohida uploadStickerFile bilan yuklaymiz —
+    # shu tarzda bittasi xato bersa (buzilgan TGS va h.k.), pack yaratishdan
+    # OLDIN aniqlaymiz, yarim yaratilgan pack qolib ketmaydi.
+    uploaded = []
+    for filename, content in tgs_items:
+        file_id = upload_sticker_file(owner_user_id, filename, content, "animated")
+        if file_id:
+            uploaded.append(file_id)
+        else:
+            errors.append(f"{filename}: yuklab bo'lmadi (buzilgan TGS bo'lishi mumkin)")
+
+    if not uploaded:
+        return False, 0, errors or ["Hech bir fayl yuklanmadi"]
+
+    first_batch = uploaded[:1]
+    rest = uploaded[1:]
+
+    stickers_payload = [
+        {"sticker": fid, "format": "animated", "emoji_list": [emoji]}
+        for fid in first_batch
+    ]
+    create_params = {
+        "user_id": owner_user_id, "name": name, "title": title,
+        "stickers": json.dumps(stickers_payload),
+        "sticker_type": sticker_type,
+    }
+    result = tg_call("createNewStickerSet", **create_params)
+    if not result.get("ok"):
+        return False, 0, errors + [f"createNewStickerSet xato: {result.get('description', result)}"]
+
+    added_count = 1
+    for fid in rest:
+        add_result = tg_call(
+            "addStickerToSet", user_id=owner_user_id, name=name,
+            sticker=json.dumps({"sticker": fid, "format": "animated", "emoji_list": [emoji]}),
+        )
+        if add_result.get("ok"):
+            added_count += 1
+        else:
+            errors.append(f"addStickerToSet xato: {add_result.get('description', add_result)}")
+
+    return True, added_count, errors
+
+
+def extract_tgs_from_zip(zip_bytes):
+    """ZIP ichidan barcha .tgs fayllarni ajratib oladi.
+    Qaytaradi: [(filename, bytes), ...]"""
+    items = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                if info.filename.lower().endswith(".tgs"):
+                    with zf.open(info) as f:
+                        items.append((os.path.basename(info.filename), f.read()))
+    except zipfile.BadZipFile:
+        return []
+    return items
+
+
 def convert_to_webm(content_bytes):
     """MP4/GIF baytlarini ovozsiz VP9 webm'ga o'giradi. Muvaffaqiyatsiz bo'lsa None qaytaradi."""
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
@@ -2322,6 +2437,50 @@ def _handle_animation_request_sync(chat_id, msg, requester_info, requester_id, r
         send_document_bytes(CACHE_GROUP_ID, zip_name, zip_bytes, caption=f"{requester_info} yuklagan GIF", decoration_key="cc09ad5b6")
 
 
+# ---------- ZIP -> publish (yangi sticker/custom emoji pack yaratish) ----------
+
+def handle_zip_publish_request(chat_id, msg, requester_info, requester_id, reply_to=None, business_connection_id=None):
+    run_safe_thread(
+        _handle_zip_publish_request_sync,
+        chat_id, msg, requester_info, requester_id, reply_to, business_connection_id,
+        chat_id=chat_id, reply_to=reply_to, business_connection_id=business_connection_id,
+    )
+
+
+def _handle_zip_publish_request_sync(chat_id, msg, requester_info, requester_id, reply_to=None, business_connection_id=None):
+    document = msg.get("document")
+    if not document or not document.get("file_name", "").lower().endswith(".zip"):
+        return  # ZIP bo'lmagan document'larni bu handler e'tiborsiz qoldiradi
+    file_path = get_file_path(document["file_id"])
+    if not file_path:
+        send_message(chat_id, "ZIP faylni olishda xato yuz berdi.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
+        return
+    zip_bytes = download_file_bytes(file_path)
+    tgs_items = extract_tgs_from_zip(zip_bytes)
+    if not tgs_items:
+        send_message(chat_id,
+                      "Bu ZIP ichida .tgs fayl topilmadi. Publish qilish faqat animatsion (.tgs) "
+                      "stikerlar to'plami uchun ishlaydi.",
+                      reply_to=reply_to, business_connection_id=business_connection_id)
+        return
+    if len(tgs_items) > STICKER_SET_MAX_CUSTOM_EMOJI:
+        send_message(chat_id,
+                      f"ZIP'da {len(tgs_items)} ta .tgs bor, lekin bitta to'plamda ko'pi bilan "
+                      f"{STICKER_SET_MAX_CUSTOM_EMOJI} ta bo'lishi mumkin. Faqat birinchi "
+                      f"{STICKER_SET_MAX_CUSTOM_EMOJI} tasi ishlatiladi.",
+                      reply_to=reply_to, business_connection_id=business_connection_id)
+        tgs_items = tgs_items[:STICKER_SET_MAX_CUSTOM_EMOJI]
+
+    set_pending_input(
+        requester_id, "zip_publish_title",
+        {"tgs_items": tgs_items,
+         "chat_id": chat_id, "reply_to": reply_to, "business_connection_id": business_connection_id},
+    )
+    send_message(chat_id, f"✅ ZIP'dan {len(tgs_items)} ta .tgs topildi.\n\nYangi to'plam uchun SARLAVHA (title) yozing (masalan: \"Mening Stikerlarim\"):",
+                 reply_to=reply_to, business_connection_id=business_connection_id)
+
+
 def requester_label(from_user):
     return (
         f"@{from_user.get('username')} (id:{from_user.get('id')})"
@@ -2435,6 +2594,9 @@ def build_help_text(user_id):
         "📋 <b>Bot haqida</b>\n\n"
         "Menga sticker/custom emoji/GIF forward qiling yoki \"📦 Pack yuklab olish\" "
         "tugmasini bosib pack nomini yuboring — men barcha fayllarni ZIP qilib beraman.\n\n"
+        "📤 <b>Publish qilish:</b> .tgs fayllar solingan ZIP yuborsangiz, men ulardan "
+        "sizga tegishli YANGI sticker yoki custom emoji to'plami yasab beraman "
+        "(o'zingiz sarlavha, tur va emoji tanlaysiz).\n\n"
         "⚙️ <b>Limit qoidalari:</b>\n"
         f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
         f"• Har bir referal haftalik imkoniyatingizni +1 taga oshiradi "
@@ -3679,6 +3841,83 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
 
     action = pending["action"]
 
+    if action == "zip_publish_title":
+        clear_pending_input(user_id)
+        title = text.strip()[:64]
+        if not title:
+            send_message(chat_id, "Sarlavha bo'sh bo'lmasin. Bekor qilindi.")
+            return True
+        data = dict(pending["data"])
+        data["title"] = title
+        set_pending_input(user_id, "zip_publish_type", data)
+        send_message(
+            chat_id,
+            "To'plam turini tanlang — yozib yuboring:\n"
+            "• <code>emoji</code> — Custom Emoji sifatida (matn ichida ishlatiladi, 200 tagacha)\n"
+            "• <code>sticker</code> — oddiy Sticker sifatida (50 tagacha)",
+            parse_mode_html=True,
+        )
+        return True
+
+    if action == "zip_publish_type":
+        raw = text.strip().lower()
+        if raw not in ("emoji", "sticker"):
+            send_message(chat_id, "Faqat \"emoji\" yoki \"sticker\" deb yozing.")
+            return True
+        clear_pending_input(user_id)
+        data = dict(pending["data"])
+        data["sticker_type"] = "custom_emoji" if raw == "emoji" else "regular"
+        set_pending_input(user_id, "zip_publish_emoji", data)
+        send_message(chat_id, "Barcha stikerlarga biriktiriladigan bitta emoji yuboring (masalan: 😀):")
+        return True
+
+    if action == "zip_publish_emoji":
+        clear_pending_input(user_id)
+        emoji = text.strip()
+        # oddiy tekshiruv: bitta emoji-uzunlikdagi belgi (ortiqcha matn kelsa ham birinchi belgisini olamiz)
+        if not emoji:
+            send_message(chat_id, "Emoji bo'sh bo'lmasin. Bekor qilindi.")
+            return True
+        emoji = emoji[:8]  # ba'zi emojilar bir nechta code point (masalan flag), ehtiyot chegarasi
+        data = pending["data"]
+        tgs_items = data["tgs_items"]
+        title = data["title"]
+        sticker_type = data["sticker_type"]
+        pub_chat_id = data["chat_id"]
+        reply_to = data.get("reply_to")
+        bc_id = data.get("business_connection_id")
+
+        allowed, reason = can_make_request(user_id)
+        if not allowed:
+            send_message(pub_chat_id, reason, reply_to=reply_to, business_connection_id=bc_id)
+            return True
+
+        send_message(pub_chat_id, f"⏳ {len(tgs_items)} ta sticker publish qilinmoqda, kuting...",
+                     reply_to=reply_to, business_connection_id=bc_id)
+
+        raw_name = title
+        set_name = sanitize_sticker_set_name(raw_name, user_id)
+        created, added_count, errors = create_sticker_set_from_tgs(
+            user_id, set_name, title, tgs_items, emoji, sticker_type=sticker_type,
+        )
+        if not created:
+            release_request_slot(user_id)
+            err_text = "\n".join(errors[:5]) if errors else "noma'lum xato"
+            send_message(pub_chat_id,
+                          f"⚠️ To'plam yaratilmadi.\n{err_text}\n\n"
+                          f"Eslatma: bu funksiya ishlashi uchun avval botga /start yozgan bo'lishingiz kerak.",
+                          reply_to=reply_to, business_connection_id=bc_id)
+            return True
+
+        register_request(user_id, kind="zip_publish", detail=set_name)
+        link = f"https://t.me/addstickers/{set_name}"
+        err_note = f"\n\n⚠️ {len(errors)} ta faylda muammo bo'ldi, o'tkazib yuborildi." if errors else ""
+        send_message(pub_chat_id,
+                      f"✅ To'plam yaratildi! {added_count}/{len(tgs_items)} ta sticker qo'shildi.\n{link}{err_note}",
+                      reply_to=reply_to, business_connection_id=bc_id)
+        notify_admin(f"📦 Yangi publish: id:{user_id}, {set_name}, {added_count} ta sticker")
+        return True
+
     if action == "getpack":
         clear_pending_input(user_id)
         if not enforce_force_join(chat_id, user_id):
@@ -4794,6 +5033,14 @@ def webhook():
         if pack_name:
             keyboard_rows.append([{"text": "🆔 Butun pack ID'larini berish", "callback_data": f"dl_id_pack:{token}"}])
         send_message(chat_id, "Nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
+        return {"ok": True}
+
+    # ---- ZIP fayl yuborildi: ichidan .tgs ajratib, publish qilish oqimini boshlaymiz ----
+    document = msg.get("document")
+    if document and document.get("file_name", "").lower().endswith(".zip"):
+        if not enforce_force_join(chat_id, user_id):
+            return {"ok": True}
+        handle_zip_publish_request(chat_id, msg, requester_info, user_id)
         return {"ok": True}
 
     # ---- GIF (animation) yuborildi: tanlov beramiz (webm yoki ID) ----
