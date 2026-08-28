@@ -54,6 +54,7 @@ import html
 import time
 import uuid
 import atexit
+import difflib
 import zipfile
 import hashlib
 import logging
@@ -528,6 +529,26 @@ def send_sticker_by_file_id(chat_id, file_id, business_connection_id=None):
     if business_connection_id:
         params["business_connection_id"] = business_connection_id
     return tg_call("sendSticker", **params)
+
+
+def send_sticker_bytes(chat_id, filename, file_bytes, business_connection_id=None):
+    """Video-sticker (.webm) baytlarini sendSticker orqali multipart
+    yuboradi — shu tarzda Telegram uni HAQIQIY sticker sifatida
+    tan oladi va foydalanuvchiga '➕ to'plamga qo'shish' tugmasini
+    ko'rsatadi (sendDocument bilan bunday bo'lmaydi)."""
+    files = {"sticker": (filename, file_bytes)}
+    payload = {"chat_id": chat_id}
+    if business_connection_id:
+        payload["business_connection_id"] = business_connection_id
+    resp = _http_session.post(f"{API_BASE}/sendSticker", data=payload, files=files, timeout=60)
+    try:
+        data = resp.json()
+    except ValueError:
+        log.error("sendSticker (bytes) javobi JSON emas: %s", resp.text[:300])
+        return None
+    if not data.get("ok"):
+        log.error("sendSticker (bytes) xato: %s", data)
+    return data
 
 
 def send_document_by_file_id(chat_id, file_id, caption=None, business_connection_id=None,
@@ -1552,8 +1573,68 @@ def claim_bonus_channel(user_id, target_chat_id):
 def get_sticker_set(pack_name):
     data = tg_call("getStickerSet", name=pack_name)
     if data.get("ok"):
+        record_known_pack(data["result"])
         return data["result"]
     return None
+
+
+def record_known_pack(sticker_set):
+    """Muvaffaqiyatli topilgan har bir pack haqida yengil ma'lumot
+    (nom, sarlavha, emojilar) saqlaydi — bu keyinchalik pack topilmay
+    qolganda 'balki shuni demoqchimisiz' yoki bitta stickerdan
+    'shunga o'xshash boshqa pack'lar' taklif qilish uchun ishlatiladi."""
+    name = sticker_set.get("name")
+    if not name:
+        return
+    emojis = sorted({s.get("emoji") for s in sticker_set.get("stickers", []) if s.get("emoji")})
+    with _state_lock:
+        known = STATE.setdefault("known_packs", {})
+        known[name.lower()] = {
+            "name": name,
+            "title": sticker_set.get("title", name),
+            "emojis": emojis,
+            "count": len(sticker_set.get("stickers", [])),
+            "seen_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # cheksiz o'smasin (STATE hajmi va har safar Telegramga qayta
+        # yuklanadigan fayl hajmi oshib ketmasin): eng ko'p 800 ta pack
+        # saqlanadi, eng eskilari chiqariladi.
+        if len(known) > 800:
+            oldest = sorted(known.items(), key=lambda kv: kv[1].get("seen_at", ""))[: len(known) - 800]
+            for k, _ in oldest:
+                known.pop(k, None)
+        save_state_locked()
+
+
+def suggest_similar_pack_names(query, limit=5):
+    """Nomi bo'yicha eng yaqin known_packs kalitlarini qaytaradi
+    (fuzzy match, difflib orqali)."""
+    with _state_lock:
+        known = dict(STATE.get("known_packs", {}))
+    if not known:
+        return []
+    query_l = query.lower().strip()
+    candidates = list(known.keys())
+    close = difflib.get_close_matches(query_l, candidates, n=limit, cutoff=0.5)
+    return [known[c]["name"] for c in close]
+
+
+def suggest_packs_by_emoji(emoji, exclude_name=None, limit=5):
+    """Berilgan emoji known_packs ichida ko'proq uchraydigan pack'larni
+    qaytaradi (o'zi bilan bir xil pack chiqarib tashlanadi)."""
+    if not emoji:
+        return []
+    with _state_lock:
+        known = dict(STATE.get("known_packs", {}))
+    matches = []
+    for key, info in known.items():
+        if exclude_name and key == exclude_name.lower():
+            continue
+        if emoji in info.get("emojis", []):
+            matches.append(info)
+    # ko'proq sticker soni bo'lganlarni birinchi ko'rsatamiz (sifat signali sifatida)
+    matches.sort(key=lambda i: i.get("count", 0), reverse=True)
+    return [m["name"] for m in matches[:limit]]
 
 
 def resolve_pack_name_from_text(raw):
@@ -1694,8 +1775,18 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
     sticker_set = get_sticker_set(pack_name)
     if not sticker_set:
         release_request_slot(requester_id)
-        send_message(chat_id, "Pack topilmadi. Nomini tekshiring.", reply_to=reply_to,
-                     business_connection_id=business_connection_id)
+        suggestions = suggest_similar_pack_names(pack_name)
+        if suggestions:
+            rows = []
+            for s in suggestions:
+                token = store_pending_choice({"pack_name": s})
+                rows.append([{"text": s, "callback_data": f"suggest_pack:{token}"}])
+            send_message(chat_id, "Pack topilmadi. Balki shulardan birini nazarda tutgandirsiz?",
+                         reply_to=reply_to, business_connection_id=business_connection_id,
+                         reply_markup={"inline_keyboard": rows})
+        else:
+            send_message(chat_id, "Pack topilmadi. Nomini tekshiring.", reply_to=reply_to,
+                         business_connection_id=business_connection_id)
         notify_admin(f"⚠️ Muvaffaqiyatsiz so'rov\nKimdan: {requester_info}\nPack: {pack_name}\nSabab: topilmadi")
         return
 
@@ -1798,6 +1889,18 @@ def extract_pack_name_from_message(msg):
 
 def extract_animation_file(msg):
     """Telegram GIF'lari 'animation' obyekti sifatida keladi (odatda mime_type=video/mp4)."""
+    animation = msg.get("animation")
+    if animation:
+        return animation["file_id"], ".mp4"
+    return None, None
+
+
+def extract_video_file(msg):
+    """Oddiy video (msg['video']) yoki GIF/animation — ikkalasini ham
+    video-sticker qilib berish uchun bitta yordamchida qamraymiz."""
+    video = msg.get("video")
+    if video:
+        return video["file_id"], ".mp4"
     animation = msg.get("animation")
     if animation:
         return animation["file_id"], ".mp4"
@@ -2222,6 +2325,51 @@ def extract_tgs_from_zip(zip_bytes):
     return items
 
 
+def convert_to_sticker_webm(content_bytes, crf=32, max_size_bytes=256 * 1024):
+    """Video/GIF baytlarini Telegram video-sticker talablariga mos VP9 webm'ga
+    o'giradi: bir tomoni aniq 512px, <=3 soniya, <=30 FPS, ovozsiz,
+    <=256KB. Agar birinchi urinishda hajm 256KB'dan oshsa, sifatni
+    pasaytirib (crf oshirib) yana urinadi. Muvaffaqiyatsiz bo'lsa None
+    qaytaradi."""
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    # scale filtri: kenroq tomoni 512px bo'ladi, boshqa tomon proporsional
+    # kamayadi va 2ga bo'linadigan qilib yaxlitlanadi (VP9 talabi).
+    scale_filter = (
+        "scale='if(gt(iw,ih),512,-2)':'if(gt(iw,ih),-2,512)',"
+        "fps=30"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        in_path = os.path.join(tmp, "input")
+        out_path = os.path.join(tmp, "output.webm")
+        with open(in_path, "wb") as f:
+            f.write(content_bytes)
+        for attempt_crf in (crf, crf + 8, crf + 16):
+            cmd = [
+                ffmpeg_path, "-y", "-i", in_path,
+                "-t", "3",
+                "-vf", scale_filter,
+                "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", str(attempt_crf),
+                "-an",
+                out_path,
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                log.error("ffmpeg sticker-webm konvertatsiya xatosi (crf=%s): %s", attempt_crf, e)
+                return None
+            if not os.path.exists(out_path):
+                return None
+            size = os.path.getsize(out_path)
+            if size <= max_size_bytes:
+                with open(out_path, "rb") as f:
+                    return f.read()
+            log.warning("Sticker-webm hajmi %d bayt (>%d), crf oshirib qayta urinilmoqda", size, max_size_bytes)
+        # Uch urinishdan keyin ham katta bo'lsa, oxirgi (eng kichik) natijani baribir qaytaramiz —
+        # chaqiruvchi tomon yakuniy hajmni yana tekshiradi.
+        with open(out_path, "rb") as f:
+            return f.read()
+
+
 def convert_to_webm(content_bytes):
     """MP4/GIF baytlarini ovozsiz VP9 webm'ga o'giradi. Muvaffaqiyatsiz bo'lsa None qaytaradi."""
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
@@ -2248,6 +2396,49 @@ def convert_to_webm(content_bytes):
 
 def handle_id_single_request(chat_id, pending, requester_id):
     run_safe_thread(_handle_id_single_request_sync, chat_id, pending, requester_id, chat_id=chat_id)
+
+
+# ---------- Video/GIF -> tayyor video-sticker (webm) ----------
+
+def handle_video_to_sticker_request(chat_id, pending, requester_id):
+    run_safe_thread(_handle_video_to_sticker_request_sync, chat_id, pending, requester_id, chat_id=chat_id)
+
+
+def _handle_video_to_sticker_request_sync(chat_id, pending, requester_id):
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason)
+        return
+    file_path = get_file_path(pending["file_id"])
+    if not file_path:
+        release_request_slot(requester_id)
+        send_message(chat_id, "Faylni olishda xato yuz berdi.")
+        return
+    content = download_file_bytes(file_path)
+    webm_bytes = convert_to_sticker_webm(content)
+    if not webm_bytes:
+        release_request_slot(requester_id)
+        send_message(chat_id, "Video-stickerga o'girishda xato yuz berdi. Qaytadan urinib ko'ring.")
+        return
+    if len(webm_bytes) > 256 * 1024:
+        release_request_slot(requester_id)
+        send_message(chat_id,
+                      "Video juda murakkab — 256KB chegarasiga sig'dirib bo'lmadi. "
+                      "Qisqaroq yoki soddaroq video bilan urinib ko'ring.")
+        return
+    filename = f"sticker_{int(datetime.now(timezone.utc).timestamp())}.webm"
+    register_request(requester_id, kind="video_sticker", detail=filename)
+    result = send_sticker_bytes(chat_id, filename, webm_bytes)
+    if not result or not result.get("ok"):
+        # sticker sifatida yuborish rad etilsa (masalan Telegram formatni
+        # qat'iyroq tekshirsa), zaxira sifatida oddiy fayl qilib beramiz —
+        # foydalanuvchi hech bo'lmasa faylni qo'lda olishi mumkin bo'lsin.
+        send_document_bytes(chat_id, filename, webm_bytes,
+                            caption="Sticker sifatida yuborib bo'lmadi, fayl sifatida yuboryapman.")
+        return
+    send_message(chat_id,
+                  "✅ Tayyor! Yuqoridagi stickerni bosib, \"➕ To'plamga qo'shish\" orqali "
+                  "o'zingizning sticker to'plamingizga qo'shishingiz mumkin.")
 
 
 def _handle_id_single_request_sync(chat_id, pending, requester_id):
@@ -3051,6 +3242,33 @@ def handle_callback_query(cq):
         handle_id_single_request(chat_id, pending, user_id)
         return
 
+    if data.startswith("suggest_pack:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending or not pending.get("pack_name"):
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan.")
+            return
+        pack_name = pending["pack_name"]
+        edit_message_text(chat_id, message_id, f"⏳ '{pack_name}' qidirilmoqda...")
+        handle_pack_request(chat_id, pack_name, requester_label({"id": user_id}), user_id)
+        return
+
+    if data.startswith("similar_packs:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending or not pending.get("packs"):
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan.")
+            return
+        rows = []
+        for pname in pending["packs"]:
+            ptoken = store_pending_choice({"pack_name": pname})
+            rows.append([{"text": pname, "callback_data": f"suggest_pack:{ptoken}"}])
+        edit_message_text(chat_id, message_id, "Shu emoji bilan bog'liq boshqa pack'lar:",
+                          reply_markup={"inline_keyboard": rows})
+        return
+
     if data.startswith("dl_id_pack:"):
         answer_callback_query(cq_id)
         token = data.split(":", 1)[1]
@@ -3112,16 +3330,18 @@ def handle_callback_query(cq):
         handle_id_pack_request(chat_id, pending["pack_name"], pending["requester_info"], user_id, mode)
         return
 
-    if data.startswith("dl_gif_webm:") or data.startswith("dl_gif_id:"):
+    if data.startswith("dl_gif_webm:") or data.startswith("dl_gif_id:") or data.startswith("dl_video_sticker:"):
         answer_callback_query(cq_id)
         token = data.split(":", 1)[1]
         pending = pop_pending_choice(token)
         if not pending:
-            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. GIF'ni qaytadan yuboring.")
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Faylni qaytadan yuboring.")
             return
         edit_message_text(chat_id, message_id, "⏳ Tayyorlanmoqda...")
         if data.startswith("dl_gif_webm:"):
             handle_gif_webm_request(chat_id, pending, user_id)
+        elif data.startswith("dl_video_sticker:"):
+            handle_video_to_sticker_request(chat_id, pending, user_id)
         else:
             handle_gif_id_request(chat_id, pending, user_id)
         return
@@ -5032,6 +5252,11 @@ def webhook():
         keyboard_rows.append([{"text": "🆔 Shu stiker/emojining ID'sini berish", "callback_data": f"dl_id_single:{token}"}])
         if pack_name:
             keyboard_rows.append([{"text": "🆔 Butun pack ID'larini berish", "callback_data": f"dl_id_pack:{token}"}])
+        if emoji_char:
+            similar = suggest_packs_by_emoji(emoji_char, exclude_name=pack_name)
+            if similar:
+                sim_token = store_pending_choice({"packs": similar})
+                keyboard_rows.append([{"text": f"🔎 {emoji_char} bilan o'xshash pack'lar", "callback_data": f"similar_packs:{sim_token}"}])
         send_message(chat_id, "Nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
         return {"ok": True}
 
@@ -5043,20 +5268,23 @@ def webhook():
         handle_zip_publish_request(chat_id, msg, requester_info, user_id)
         return {"ok": True}
 
-    # ---- GIF (animation) yuborildi: tanlov beramiz (webm yoki ID) ----
-    animation_file_id, _ = extract_animation_file(msg)
-    if animation_file_id:
+    # ---- GIF yoki oddiy video yuborildi: tanlov beramiz (webm/ID/video-sticker) ----
+    video_file_id, _ = extract_video_file(msg)
+    if video_file_id:
         if not enforce_force_join(chat_id, user_id):
             return {"ok": True}
+        is_gif = bool(msg.get("animation"))
         token = store_pending_choice({
-            "file_id": animation_file_id, "requester_info": requester_info,
+            "file_id": video_file_id, "requester_info": requester_info,
             "raw_message": msg, "update_id": update.get("update_id"),
         })
         keyboard_rows = [
-            [{"text": "🎞 WebM qilib berish", "callback_data": f"dl_gif_webm:{token}"}],
-            [{"text": "🆔 ID sini berish", "callback_data": f"dl_gif_id:{token}"}],
+            [{"text": "🎬 Video-sticker qilib berish (to'plamga qo'shsa bo'ladigan)", "callback_data": f"dl_video_sticker:{token}"}],
         ]
-        send_message(chat_id, "GIF bilan nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
+        if is_gif:
+            keyboard_rows.append([{"text": "🎞 WebM qilib berish", "callback_data": f"dl_gif_webm:{token}"}])
+            keyboard_rows.append([{"text": "🆔 ID sini berish", "callback_data": f"dl_gif_id:{token}"}])
+        send_message(chat_id, "Bu fayl bilan nima qilishimni xohlaysiz?", reply_markup={"inline_keyboard": keyboard_rows})
         return {"ok": True}
 
     pack_name = extract_pack_name_from_message(msg)
