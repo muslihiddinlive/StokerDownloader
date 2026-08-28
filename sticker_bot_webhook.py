@@ -5491,14 +5491,15 @@ def webhook():
                 register_referral(user_id, referrer_id)
             except ValueError:
                 pass
+        send_message(chat_id, f"<code>{user_id}</code>", parse_mode_html=True, add_signature=False)
         greeting = (
-            f"Salom! Sizning ID'ingiz: <code>{user_id}</code> (bosib nusxa oling)\n\n"
-            "Menga sticker/custom emoji yoki GIF forward qiling, yoki pastdagi "
+            "👆 Sizning Telegram ID'ingiz (bosib nusxa oling)\n\n"
+            "Salom! Menga sticker/custom emoji yoki GIF forward qiling, yoki pastdagi "
             "\"📦 Pack yuklab olish\" tugmasi orqali pack nomini yuboring."
         )
         if user_id == SUPERADMIN_ID:
             greeting += "\n\n👑 Superadmin sifatida quyida boshqaruv paneliga ham kirishingiz mumkin."
-        send_message(chat_id, greeting, parse_mode_html=True, reply_markup=main_menu_keyboard(user_id))
+        send_message(chat_id, greeting, reply_markup=main_menu_keyboard(user_id))
         return {"ok": True}
 
     # ---- Bitta xabarda 2+ animated/premium emoji: hammasini birdan ZIP qilib beramiz ----
