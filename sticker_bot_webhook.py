@@ -654,6 +654,7 @@ def default_user_record():
         "type_counts": {"sticker": 0, "emoji": 0, "gif": 0, "pack": 0},
         "history": [],
         "first_seen": None,
+        "stars_wallet": 0,  # foydalanuvchining bot ichidagi Stars hamyoni (publish va h.k. uchun)
     }
 
 
@@ -828,6 +829,7 @@ def get_limit_config():
         cfg.setdefault("premium_price_stars", 300)
         cfg.setdefault("premium_days", 182)
         cfg.setdefault("stars_per_limit", 1)  # 1 Star = shuncha ta limit
+        cfg.setdefault("publish_price_stars", 1)  # 1 marta publish qilish narxi (Stars)
         return dict(cfg)
 
 
@@ -1228,6 +1230,32 @@ def get_user_record(user_id):
         for key, value in default_user_record().items():
             record.setdefault(key, value)
         return record
+
+
+def get_stars_wallet(user_id):
+    return get_user_record(user_id).get("stars_wallet", 0)
+
+
+def add_to_stars_wallet(user_id, amount):
+    """Hamyonga Stars qo'shadi (masalan foydalanuvchi to'lov qilganda)."""
+    with _state_lock:
+        record = get_user_record(user_id)
+        record["stars_wallet"] = record.get("stars_wallet", 0) + amount
+        save_state_locked()
+        return record["stars_wallet"]
+
+
+def try_spend_from_wallet(user_id, amount):
+    """Hamyondan yechishga urinadi. Yetarli bo'lsa True va yechadi,
+    yetmasa False qaytaradi (hech narsa yechilmaydi)."""
+    with _state_lock:
+        record = get_user_record(user_id)
+        if record.get("stars_wallet", 0) < amount:
+            return False
+        record["stars_wallet"] -= amount
+        save_state_locked()
+        _flush_state_now_locked()  # pul sarflandi — kutmasdan darhol yoziladi
+        return True
 
 
 def is_premium(user_id):
@@ -2020,24 +2048,46 @@ def handle_direct_file_id_request(chat_id, file_id, requester_info, requester_id
 
 def _handle_direct_file_id_request_sync(chat_id, file_id, requester_info, requester_id, reply_to=None, business_connection_id=None):
     """Foydalanuvchi sticker/emoji/gif ni forward qilish o'rniga to'g'ridan-to'g'ri file_id yozib yuborsa ham ishlaydi."""
-    allowed, reason = can_make_request(requester_id)
-    if not allowed:
-        send_message(chat_id, reason, reply_to=reply_to, business_connection_id=business_connection_id)
-        return
     file_path = get_file_path(file_id)
     if not file_path:
-        release_request_slot(requester_id)
         send_message(chat_id, "Bu ID bo'yicha fayl topilmadi (ID noto'g'ri yoki botga tegishli emas).",
                      reply_to=reply_to, business_connection_id=business_connection_id)
         return
-    content = download_file_bytes(file_path)
     ext = ("." + file_path.rsplit(".", 1)[-1]) if "." in file_path else ""
+    token = store_pending_choice({
+        "file_id": file_id, "ext": ext, "requester_info": requester_info,
+    })
+    keyboard_rows = [[{"text": "💾 ZIP qilib olish", "callback_data": f"dl_direct_id:{token}"}]]
+    if ext == ".tgs":
+        keyboard_rows.append([{"text": "📤 Shaxsiy publish qilish", "callback_data": f"publish_single:{token}"}])
+    send_message(chat_id, "Bu ID bilan nima qilishimni xohlaysiz?", reply_to=reply_to,
+                 business_connection_id=business_connection_id, reply_markup={"inline_keyboard": keyboard_rows})
+
+
+def _finish_direct_file_id_zip(chat_id, pending, requester_id):
+    run_safe_thread(_finish_direct_file_id_zip_sync, chat_id, pending, requester_id, chat_id=chat_id)
+
+
+def _finish_direct_file_id_zip_sync(chat_id, pending, requester_id):
+    """Avval faqat _handle_direct_file_id_request_sync ichida edi — endi
+    'ZIP qilib olish' tugmasi bosilganda ishlaydi."""
+    allowed, reason = can_make_request(requester_id)
+    if not allowed:
+        send_message(chat_id, reason)
+        return
+    file_path = get_file_path(pending["file_id"])
+    if not file_path:
+        release_request_slot(requester_id)
+        send_message(chat_id, "Faylni olishda xato yuz berdi.")
+        return
+    content = download_file_bytes(file_path)
+    ext = pending.get("ext", "")
     filename = f"file_{int(datetime.now(timezone.utc).timestamp())}{ext}"
     register_request(requester_id, kind="direct_id", detail=filename)
     zip_bytes = zip_single_file(filename, content)
     zip_name = f"{filename}.zip"
-    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.",
-                        business_connection_id=business_connection_id)
+    send_document_bytes(chat_id, zip_name, zip_bytes, caption="Faylni ochish uchun ZIP'ni yeching.")
+    requester_info = pending.get("requester_info", "?")
     notify_admin(f"✅ ID orqali fayl yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, zip_name, zip_bytes, caption=f"{requester_info} ID orqali yuklagan fayl", decoration_key="c7c1e2f8f")
@@ -2323,6 +2373,145 @@ def extract_tgs_from_zip(zip_bytes):
     except zipfile.BadZipFile:
         return []
     return items
+
+
+def _run_publish_flow(user_id, data):
+    """Barcha publish manbalari (ZIP, bitta sticker, butun pack, ID)
+    uchun UMUMIY yakuniy bosqich: narxni tekshiradi, avval Stars
+    hamyonidan yechishga urinadi, yetmasa Telegram Stars invoice
+    so'raydi (to'lansa keyinroq bu funksiya yana chaqiriladi), keyin
+    haqiqiy sticker/emoji to'plamini yaratadi."""
+    tgs_items = data["tgs_items"]
+    title = data["title"]
+    sticker_type = data["sticker_type"]
+    emoji = data["emoji"]
+    pub_chat_id = data["chat_id"]
+    reply_to = data.get("reply_to")
+    bc_id = data.get("business_connection_id")
+
+    cfg = get_limit_config()
+    price = cfg["publish_price_stars"]
+
+    if price > 0 and not is_admin(user_id):
+        paid = try_spend_from_wallet(user_id, price)
+        if not paid:
+            wallet = get_stars_wallet(user_id)
+            need = price - wallet
+            # Hamyonda yetarli emas — foydalanuvchidan yetishmagan qismni
+            # to'lashni so'raymiz. Invoice muvaffaqiyatli to'lansa,
+            # topup_wallet oqimi hamyonga qo'shadi, so'ng foydalanuvchi
+            # publish so'rovini qayta yuborishi kerak bo'ladi (oddiyroq va
+            # xatosizroq, chunki bitta invoice ichida ikki xil amalni
+            # birlashtirish murakkablashtiradi).
+            with _state_lock:
+                STATE.setdefault("pending_publish", {})[str(user_id)] = data
+                save_state_locked()
+            send_message(
+                pub_chat_id,
+                f"📤 Publish narxi: {price} ⭐, hamyoningizda: {wallet} ⭐.\n"
+                f"Yetishmagan {need} ⭐'ni to'lang — to'lov tasdiqlangach avtomatik davom etadi.",
+                reply_to=reply_to, business_connection_id=bc_id,
+            )
+            tg_call(
+                "sendInvoice", chat_id=pub_chat_id, title=f"Publish uchun {need} Stars",
+                description="To'langach, avval boshlagan publish so'rovingiz avtomatik davom etadi.",
+                payload=f"topup_wallet:{need}:{user_id}", provider_token="", currency="XTR",
+                prices=[{"label": f"{need} Stars", "amount": need}],
+            )
+            return
+
+    send_message(pub_chat_id, f"⏳ {len(tgs_items)} ta sticker publish qilinmoqda, kuting...",
+                 reply_to=reply_to, business_connection_id=bc_id)
+
+    set_name = sanitize_sticker_set_name(title, user_id)
+    created, added_count, errors = create_sticker_set_from_tgs(
+        user_id, set_name, title, tgs_items, emoji, sticker_type=sticker_type,
+    )
+    if not created:
+        # Pul allaqachon yechilgan bo'lsa, qaytaramiz — foydalanuvchi
+        # muvaffaqiyatsiz urinish uchun pul yo'qotmasin.
+        if price > 0 and not is_admin(user_id):
+            add_to_stars_wallet(user_id, price)
+        err_text = "\n".join(errors[:5]) if errors else "noma'lum xato"
+        send_message(pub_chat_id,
+                      f"⚠️ To'plam yaratilmadi (to'langan {price} ⭐ hamyoningizga qaytarildi).\n{err_text}\n\n"
+                      f"Eslatma: bu funksiya ishlashi uchun avval botga /start yozgan bo'lishingiz kerak.",
+                      reply_to=reply_to, business_connection_id=bc_id)
+        return
+
+    link = f"https://t.me/addstickers/{set_name}"
+    err_note = f"\n\n⚠️ {len(errors)} ta faylda muammo bo'ldi, o'tkazib yuborildi." if errors else ""
+    send_message(pub_chat_id,
+                  f"✅ To'plam yaratildi! {added_count}/{len(tgs_items)} ta sticker qo'shildi.\n{link}{err_note}",
+                  reply_to=reply_to, business_connection_id=bc_id)
+    notify_admin(f"📦 Yangi publish: id:{user_id}, {set_name}, {added_count} ta sticker, {price} Stars")
+
+
+def handle_single_publish_request(chat_id, pending, requester_id):
+    run_safe_thread(_handle_single_publish_request_sync, chat_id, pending, requester_id, chat_id=chat_id)
+
+
+def _handle_single_publish_request_sync(chat_id, pending, requester_id):
+    file_id = pending.get("file_id")
+    ext = pending.get("ext")
+    if not file_id or ext != ".tgs":
+        send_message(chat_id, "Bu fayl animatsion (.tgs) emas, publish qilib bo'lmaydi.")
+        return
+    file_path = get_file_path(file_id)
+    if not file_path:
+        send_message(chat_id, "Faylni olishda xato yuz berdi.")
+        return
+    content = download_file_bytes(file_path)
+    tgs_items = [("sticker.tgs", content)]
+    set_pending_input(
+        requester_id, "zip_publish_title",
+        {"tgs_items": tgs_items, "chat_id": chat_id, "reply_to": None, "business_connection_id": None},
+    )
+    price = get_limit_config()["publish_price_stars"]
+    wallet = get_stars_wallet(requester_id)
+    price_note = f"\n\n📤 Publish narxi: {price} ⭐ (hamyoningizda: {wallet} ⭐)" if price > 0 else ""
+    send_message(chat_id, f"✅ Sticker olindi.{price_note}\n\nYangi to'plam uchun SARLAVHA (title) yozing (masalan: \"Mening Stikerim\"):")
+
+
+def handle_pack_publish_request(chat_id, pack_name, requester_id):
+    run_safe_thread(_handle_pack_publish_request_sync, chat_id, pack_name, requester_id, chat_id=chat_id)
+
+
+def _handle_pack_publish_request_sync(chat_id, pack_name, requester_id):
+    sticker_set = get_sticker_set(pack_name)
+    if not sticker_set:
+        send_message(chat_id, "Pack topilmadi. Nomini tekshiring.")
+        return
+    tgs_stickers = [s for s in sticker_set.get("stickers", []) if s.get("is_animated")]
+    if not tgs_stickers:
+        send_message(chat_id,
+                      "Bu pack'da animatsion (.tgs) sticker yo'q. Publish qilish faqat "
+                      ".tgs formatidagi stikerlar uchun ishlaydi.")
+        return
+    max_count = STICKER_SET_MAX_CUSTOM_EMOJI  # eng katta ehtimoliy limit, tur tanlangach yana kesiladi
+    tgs_stickers = tgs_stickers[:max_count]
+
+    send_message(chat_id, f"⏳ Pack'dan {len(tgs_stickers)} ta animatsion sticker yuklanmoqda, kuting...")
+    tgs_items = []
+    for i, sticker in enumerate(tgs_stickers, start=1):
+        file_path = get_file_path(sticker["file_id"])
+        if not file_path:
+            continue
+        content = download_file_bytes(file_path)
+        tgs_items.append((f"{pack_name}_{i}.tgs", content))
+
+    if not tgs_items:
+        send_message(chat_id, "Hech bir faylni yuklab bo'lmadi. Qayta urinib ko'ring.")
+        return
+
+    set_pending_input(
+        requester_id, "zip_publish_title",
+        {"tgs_items": tgs_items, "chat_id": chat_id, "reply_to": None, "business_connection_id": None},
+    )
+    price = get_limit_config()["publish_price_stars"]
+    wallet = get_stars_wallet(requester_id)
+    price_note = f"\n\n📤 Publish narxi: {price} ⭐ (hamyoningizda: {wallet} ⭐)" if price > 0 else ""
+    send_message(chat_id, f"✅ Pack'dan {len(tgs_items)} ta sticker olindi.{price_note}\n\nYangi to'plam uchun SARLAVHA (title) yozing:")
 
 
 def convert_to_sticker_webm(content_bytes, crf=32, max_size_bytes=256 * 1024):
@@ -2668,7 +2857,10 @@ def _handle_zip_publish_request_sync(chat_id, msg, requester_info, requester_id,
         {"tgs_items": tgs_items,
          "chat_id": chat_id, "reply_to": reply_to, "business_connection_id": business_connection_id},
     )
-    send_message(chat_id, f"✅ ZIP'dan {len(tgs_items)} ta .tgs topildi.\n\nYangi to'plam uchun SARLAVHA (title) yozing (masalan: \"Mening Stikerlarim\"):",
+    price = get_limit_config()["publish_price_stars"]
+    wallet = get_stars_wallet(requester_id)
+    price_note = f"\n\n📤 Publish narxi: {price} ⭐ (hamyoningizda: {wallet} ⭐)" if price > 0 else ""
+    send_message(chat_id, f"✅ ZIP'dan {len(tgs_items)} ta .tgs topildi.{price_note}\n\nYangi to'plam uchun SARLAVHA (title) yozing (masalan: \"Mening Stikerlarim\"):",
                  reply_to=reply_to, business_connection_id=business_connection_id)
 
 
@@ -2781,13 +2973,15 @@ def build_help_text(user_id):
     cfg = get_limit_config()
     base = cfg["base_weekly"]
     weekly_cap = cfg["weekly_cap"]
+    publish_price = cfg["publish_price_stars"]
     return (
         "📋 <b>Bot haqida</b>\n\n"
         "Menga sticker/custom emoji/GIF forward qiling yoki \"📦 Pack yuklab olish\" "
         "tugmasini bosib pack nomini yuboring — men barcha fayllarni ZIP qilib beraman.\n\n"
-        "📤 <b>Publish qilish:</b> .tgs fayllar solingan ZIP yuborsangiz, men ulardan "
-        "sizga tegishli YANGI sticker yoki custom emoji to'plami yasab beraman "
-        "(o'zingiz sarlavha, tur va emoji tanlaysiz).\n\n"
+        "📤 <b>Publish qilish:</b> ZIP (.tgs fayllar), bitta sticker, butun pack, yoki "
+        "ID orqali — istalgan manbadan sizga tegishli YANGI sticker yoki custom emoji "
+        f"to'plami yasab beraman (narxi: {publish_price} ⭐ / 1 marta, Stars hamyoningizdan "
+        "yechiladi, yetmasa to'lov so'raladi).\n\n"
         "⚙️ <b>Limit qoidalari:</b>\n"
         f"• Yangi foydalanuvchi: haftasiga {base} marta bepul so'rov.\n"
         f"• Har bir referal haftalik imkoniyatingizni +1 taga oshiradi "
@@ -2810,6 +3004,7 @@ def _render_limits_panel_text_and_keyboard():
         f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n\n"
         f"⭐ Premium narxi: {cfg['premium_price_stars']} Stars ({months} oy)\n"
         f"➕ Stars→limit nisbati: 1 Star = {cfg['stars_per_limit']} limit\n"
+        f"📤 Publish narxi: {cfg['publish_price_stars']} Stars / 1 marta\n"
     )
     keyboard = {"inline_keyboard": [
         [
@@ -2827,6 +3022,7 @@ def _render_limits_panel_text_and_keyboard():
         [{"text": "✏️ Premium narxini o'zgartirish", "callback_data": "edit_premium_price"}],
         [{"text": "✏️ Premium muddatini o'zgartirish (kun)", "callback_data": "edit_premium_days"}],
         [{"text": "✏️ Stars→limit nisbatini o'zgartirish", "callback_data": "edit_stars_ratio"}],
+        [{"text": "✏️ Publish narxini o'zgartirish", "callback_data": "edit_publish_price"}],
         [{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}],
     ]}
     return text, keyboard
@@ -2914,23 +3110,42 @@ def handle_callback_query(cq):
         days = cfg["premium_days"]
         months = round(days / 30.4, 1)
         ratio = cfg["stars_per_limit"]
+        wallet = get_stars_wallet(user_id)
+        wallet_line = f"\n\n💰 Stars hamyoningiz: {wallet} ⭐"
         if is_premium(user_id):
             record = get_user_record(user_id)
             until = datetime.fromtimestamp(record["premium_until"], tz=timezone.utc).strftime("%Y-%m-%d")
+            keyboard = {"inline_keyboard": [
+                [{"text": "➕ Stars hamyonini to'ldirish", "callback_data": "buy_wallet_custom"}],
+                [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
+            ]}
             safe_edit_or_send(chat_id, message_id,
-                               f"⭐ Sizda premium allaqachon faol — {until} sanagacha cheksiz foydalanasiz.",
-                               reply_markup=back_to_menu_keyboard())
+                               f"⭐ Sizda premium allaqachon faol — {until} sanagacha cheksiz foydalanasiz.{wallet_line}",
+                               reply_markup=keyboard)
         else:
             text = (f"⭐ <b>Premium</b>\n\nPremium bilan kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
                     f"({months} oy muddatga, Telegram Stars orqali).\n\n"
                     f"Yoki xohlagan miqdorda Stars to'lab, {ratio} Star = {ratio} limit nisbatida "
-                    f"qo'shimcha limit sotib olishingiz mumkin.")
+                    f"qo'shimcha limit sotib olishingiz mumkin.\n\n"
+                    f"Stars hamyoningizga pul to'ldirib, publish va boshqa xizmatlar uchun ishlatishingiz ham mumkin."
+                    f"{wallet_line}")
             keyboard = {"inline_keyboard": [
                 [{"text": f"⭐ {price} Stars — Premium ({months} oy, cheksiz)", "callback_data": "buy_premium"}],
                 [{"text": "➕ Istagan miqdorda limit sotib olish", "callback_data": "buy_limit_custom"}],
+                [{"text": "💰 Stars hamyonini to'ldirish", "callback_data": "buy_wallet_custom"}],
                 [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
             ]}
             safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data == "buy_wallet_custom":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "buy_wallet_amount", {})
+        safe_edit_or_send(
+            chat_id, message_id,
+            "Stars hamyoningizga nechta Star to'ldirmoqchisiz? (1 dan 10000 gacha, masalan: 10):",
+            reply_markup=back_to_menu_keyboard(),
+        )
         return
 
     if data == "buy_premium":
@@ -3229,6 +3444,30 @@ def handle_callback_query(cq):
             handle_pack_request(chat_id, pending["pack_name"], pending["requester_info"], user_id)
         else:
             handle_single_sticker_request_from_pending(chat_id, pending, user_id)
+        return
+
+    if data.startswith("publish_single:") or data.startswith("publish_pack:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. Stikerni qayta forward qiling.")
+            return
+        if data.startswith("publish_pack:"):
+            handle_pack_publish_request(chat_id, pending["pack_name"], user_id)
+        else:
+            handle_single_publish_request(chat_id, pending, user_id)
+        return
+
+    if data.startswith("dl_direct_id:"):
+        answer_callback_query(cq_id)
+        token = data.split(":", 1)[1]
+        pending = pop_pending_choice(token)
+        if not pending:
+            edit_message_text(chat_id, message_id, "⏱ Bu tanlov muddati o'tgan. ID'ni qayta yuboring.")
+            return
+        edit_message_text(chat_id, message_id, "⏳ Tayyorlanmoqda...")
+        _finish_direct_file_id_zip(chat_id, pending, user_id)
         return
 
     if data.startswith("dl_id_single:"):
@@ -3814,6 +4053,15 @@ def handle_callback_query(cq):
                            reply_markup=back_to_panel_keyboard())
         return
 
+    if data == "edit_publish_price":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "edit_publish_price", {})
+        safe_edit_or_send(chat_id, message_id, "1 marta publish qilish necha Stars tursin? Butun son kiriting (masalan: 1):",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
     if data == "panel_admins":
         answer_callback_query(cq_id)
         if user_id != SUPERADMIN_ID:
@@ -4100,42 +4348,8 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             return True
         emoji = emoji[:8]  # ba'zi emojilar bir nechta code point (masalan flag), ehtiyot chegarasi
         data = pending["data"]
-        tgs_items = data["tgs_items"]
-        title = data["title"]
-        sticker_type = data["sticker_type"]
-        pub_chat_id = data["chat_id"]
-        reply_to = data.get("reply_to")
-        bc_id = data.get("business_connection_id")
-
-        allowed, reason = can_make_request(user_id)
-        if not allowed:
-            send_message(pub_chat_id, reason, reply_to=reply_to, business_connection_id=bc_id)
-            return True
-
-        send_message(pub_chat_id, f"⏳ {len(tgs_items)} ta sticker publish qilinmoqda, kuting...",
-                     reply_to=reply_to, business_connection_id=bc_id)
-
-        raw_name = title
-        set_name = sanitize_sticker_set_name(raw_name, user_id)
-        created, added_count, errors = create_sticker_set_from_tgs(
-            user_id, set_name, title, tgs_items, emoji, sticker_type=sticker_type,
-        )
-        if not created:
-            release_request_slot(user_id)
-            err_text = "\n".join(errors[:5]) if errors else "noma'lum xato"
-            send_message(pub_chat_id,
-                          f"⚠️ To'plam yaratilmadi.\n{err_text}\n\n"
-                          f"Eslatma: bu funksiya ishlashi uchun avval botga /start yozgan bo'lishingiz kerak.",
-                          reply_to=reply_to, business_connection_id=bc_id)
-            return True
-
-        register_request(user_id, kind="zip_publish", detail=set_name)
-        link = f"https://t.me/addstickers/{set_name}"
-        err_note = f"\n\n⚠️ {len(errors)} ta faylda muammo bo'ldi, o'tkazib yuborildi." if errors else ""
-        send_message(pub_chat_id,
-                      f"✅ To'plam yaratildi! {added_count}/{len(tgs_items)} ta sticker qo'shildi.\n{link}{err_note}",
-                      reply_to=reply_to, business_connection_id=bc_id)
-        notify_admin(f"📦 Yangi publish: id:{user_id}, {set_name}, {added_count} ta sticker")
+        data["emoji"] = emoji
+        _run_publish_flow(user_id, data)
         return True
 
     if action == "getpack":
@@ -4385,6 +4599,24 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         )
         return True
 
+    if action == "buy_wallet_amount":
+        clear_pending_input(user_id)
+        try:
+            amount = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+            return True
+        if amount < 1 or amount > 10000:
+            send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+            return True
+        tg_call(
+            "sendInvoice", chat_id=chat_id, title=f"{amount} Stars hamyonga to'ldirish",
+            description=f"{amount} Stars hamyoningizga qo'shiladi va publish kabi xizmatlar uchun ishlatishingiz mumkin bo'ladi.",
+            payload=f"topup_wallet:{amount}:{user_id}", provider_token="", currency="XTR",
+            prices=[{"label": f"{amount} Stars hamyon to'ldirish", "amount": amount}],
+        )
+        return True
+
     if action == "edit_premium_price":
         clear_pending_input(user_id)
         if user_id != SUPERADMIN_ID:
@@ -4431,6 +4663,22 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             return True
         set_config_value("stars_per_limit", value)
         send_message(chat_id, f"✅ Endi 1 Star = {value} limit.", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "edit_publish_price":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        try:
+            value = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        if value < 0:
+            send_message(chat_id, "0 yoki undan katta son kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        set_config_value("publish_price_stars", value)
+        send_message(chat_id, f"✅ Endi publish narxi {value} Stars.", reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "add_admin":
@@ -5022,7 +5270,7 @@ def webhook():
     if pre_checkout_query:
         payer_id = pre_checkout_query["from"]["id"]
         payload = pre_checkout_query.get("invoice_payload", "")
-        if not (payload.startswith("premium:") or payload.startswith("buy_limit:")):
+        if not (payload.startswith("premium:") or payload.startswith("buy_limit:") or payload.startswith("topup_wallet:")):
             tg_call("answerPreCheckoutQuery", pre_checkout_query_id=pre_checkout_query["id"],
                      ok=False, error_message="Noma'lum buyurtma. Qaytadan urinib ko'ring.")
             return {"ok": True}
@@ -5063,6 +5311,31 @@ def webhook():
                     f"🔥🔥 KRITIK: to'lov qabul qilindi (id:{payer_id}, "
                     f"{total_amount} Stars, payload={payload!r}), lekin limit qo'shishda xato: {e}\n"
                     f"QO'LDA TEKSHIRING va foydalanuvchiga {gained} ta limit bering!"
+                )
+            return {"ok": True}
+
+        if payload.startswith("topup_wallet:"):
+            # PUL MASALASI: xatolik jim qolib ketmasligi kerak.
+            try:
+                new_balance = add_to_stars_wallet(payer_id, total_amount)
+                send_message(msg["chat"]["id"],
+                              f"🎉 Hamyoningizga {total_amount} Stars qo'shildi! Joriy balans: {new_balance} ⭐",
+                              decoration_key="m3da8a391")
+                notify_admin(f"⭐ id:{payer_id} hamyoniga {total_amount} Stars to'ldirdi (yangi balans: {new_balance}).")
+                # Agar bu to'lov to'xtab qolgan publish so'rovini davom
+                # ettirish uchun bo'lsa — endi avtomatik davom ettiramiz.
+                with _state_lock:
+                    pending_publish = STATE.get("pending_publish", {}).pop(str(payer_id), None)
+                    if pending_publish:
+                        save_state_locked()
+                if pending_publish:
+                    _run_publish_flow(payer_id, pending_publish)
+            except Exception as e:
+                log.exception("To'lovdan keyin hamyon to'ldirishda xato: %s", e)
+                notify_admin(
+                    f"🔥🔥 KRITIK: to'lov qabul qilindi (id:{payer_id}, "
+                    f"{total_amount} Stars, payload={payload!r}), lekin hamyon to'ldirishda xato: {e}\n"
+                    f"QO'LDA TEKSHIRING va foydalanuvchi hamyoniga {total_amount} Stars qo'shing!"
                 )
             return {"ok": True}
 
@@ -5252,6 +5525,10 @@ def webhook():
         keyboard_rows.append([{"text": "🆔 Shu stiker/emojining ID'sini berish", "callback_data": f"dl_id_single:{token}"}])
         if pack_name:
             keyboard_rows.append([{"text": "🆔 Butun pack ID'larini berish", "callback_data": f"dl_id_pack:{token}"}])
+        if ext == ".tgs":
+            keyboard_rows.append([{"text": "📤 Shaxsiy publish qilish (shu stiker)", "callback_data": f"publish_single:{token}"}])
+            if pack_name:
+                keyboard_rows.append([{"text": "📤 Butun pack'ni publish qilish", "callback_data": f"publish_pack:{token}"}])
         if emoji_char:
             similar = suggest_packs_by_emoji(emoji_char, exclude_name=pack_name)
             if similar:
