@@ -2883,7 +2883,7 @@ def main_menu_keyboard(user_id):
         ],
         [
             {"text": "🎁 Bonus", "callback_data": "menu_bonus"},
-            {"text": "⭐ Premium", "callback_data": "menu_premium"},
+            {"text": "💰 Tariflar", "callback_data": "menu_premium"},
         ],
         [{"text": "❓ Yordam", "callback_data": "menu_help"}],
         [{"text": "🏆 Reyting", "callback_data": "menu_leaderboard"}],
@@ -3116,18 +3116,20 @@ def handle_callback_query(cq):
             record = get_user_record(user_id)
             until = datetime.fromtimestamp(record["premium_until"], tz=timezone.utc).strftime("%Y-%m-%d")
             keyboard = {"inline_keyboard": [
-                [{"text": "➕ Stars hamyonini to'ldirish", "callback_data": "buy_wallet_custom"}],
+                [{"text": "➕ Istagan miqdorda limit sotib olish", "callback_data": "buy_limit_custom"}],
+                [{"text": "💰 Stars hamyonini to'ldirish", "callback_data": "buy_wallet_custom"}],
                 [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
             ]}
             safe_edit_or_send(chat_id, message_id,
                                f"⭐ Sizda premium allaqachon faol — {until} sanagacha cheksiz foydalanasiz.{wallet_line}",
                                reply_markup=keyboard)
         else:
-            text = (f"⭐ <b>Premium</b>\n\nPremium bilan kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
-                    f"({months} oy muddatga, Telegram Stars orqali).\n\n"
-                    f"Yoki xohlagan miqdorda Stars to'lab, {ratio} Star = {ratio} limit nisbatida "
-                    f"qo'shimcha limit sotib olishingiz mumkin.\n\n"
-                    f"Stars hamyoningizga pul to'ldirib, publish va boshqa xizmatlar uchun ishlatishingiz ham mumkin."
+            text = (f"💰 <b>Tariflar</b>\n\nQuyidagilardan birini tanlang:\n\n"
+                    f"⭐ <b>Premium</b> — kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
+                    f"({months} oy muddatga).\n\n"
+                    f"➕ <b>Qo'shimcha limit</b> — xohlagan miqdorda Stars to'lab, {ratio} Star = {ratio} limit "
+                    f"nisbatida limit sotib olasiz.\n\n"
+                    f"💰 <b>Stars hamyoni</b> — pul to'ldirib, publish va boshqa xizmatlar uchun ishlatasiz."
                     f"{wallet_line}")
             keyboard = {"inline_keyboard": [
                 [{"text": f"⭐ {price} Stars — Premium ({months} oy, cheksiz)", "callback_data": "buy_premium"}],
@@ -4591,12 +4593,15 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         cfg = get_limit_config()
         ratio = cfg["stars_per_limit"]
         gained = amount * ratio
-        tg_call(
+        result = tg_call(
             "sendInvoice", chat_id=chat_id, title=f"{gained} ta qo'shimcha limit",
             description=f"{amount} Stars to'lab, {gained} ta qo'shimcha so'rov limiti olasiz (bir martalik, bonus sifatida qo'shiladi).",
             payload=f"buy_limit:{amount}:{user_id}", provider_token="", currency="XTR",
             prices=[{"label": f"{gained} ta limit", "amount": amount}],
         )
+        if not result or not result.get("ok"):
+            err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+            send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "buy_wallet_amount":
@@ -4609,12 +4614,15 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         if amount < 1 or amount > 10000:
             send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
             return True
-        tg_call(
+        result = tg_call(
             "sendInvoice", chat_id=chat_id, title=f"{amount} Stars hamyonga to'ldirish",
             description=f"{amount} Stars hamyoningizga qo'shiladi va publish kabi xizmatlar uchun ishlatishingiz mumkin bo'ladi.",
             payload=f"topup_wallet:{amount}:{user_id}", provider_token="", currency="XTR",
             prices=[{"label": f"{amount} Stars hamyon to'ldirish", "amount": amount}],
         )
+        if not result or not result.get("ok"):
+            err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+            send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "edit_premium_price":
