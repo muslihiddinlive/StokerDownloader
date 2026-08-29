@@ -55,6 +55,7 @@ import time
 import uuid
 import atexit
 import difflib
+import base64
 import zipfile
 import hashlib
 import logging
@@ -261,16 +262,13 @@ _state_dirty = False  # save_state_locked() True qiladi; flusher thread yozib Fa
 _state_lock = threading.RLock()
 
 # Vaqtinchalik (persistent bo'lmagan) holatlar — process qayta ishga
-# tushganda yo'qolishi mumkin, bu qabul qilinadi:
+# tushganda yo'qolishi mumkin, bu qabul qilinadi (forward qilingan
+# stiker/fayl tanlovlari — foydalanuvchi shunchaki qayta forward qiladi):
 _pending_choices = {}      # forward qilingan stiker uchun "pack/single" tanlovi
 _pending_lock = threading.Lock()
 
-_pending_input = {}        # superadmin panelidagi ko'p bosqichli matn kiritish
-_pending_input_lock = threading.Lock()
-
 
 def store_pending_choice(payload):
-    import uuid
     token = uuid.uuid4().hex[:10]
     with _pending_lock:
         _pending_choices[token] = payload
@@ -282,19 +280,30 @@ def pop_pending_choice(token):
         return _pending_choices.pop(token, None)
 
 
+# _pending_input ESA endi STATE (persistent) ichida saqlanadi —
+# chunki bu ko'p bosqichli oqimlar (masalan Stars to'lash, publish
+# sarlavha/tur/emoji so'rash) orasida Render kabi platformalarda process
+# "sleep"ga ketib qayta uyg'onishi (yoki deploy) sodir bo'lishi mumkin;
+# RAM'da saqlansa, foydalanuvchi bosqich o'rtasida "yo'qoladi" va hech
+# qanday javob ololmay qoladi. STATE["pending_input"] shaklida saqlanadi.
+
+
 def set_pending_input(user_id, action, data=None):
-    with _pending_input_lock:
-        _pending_input[user_id] = {"action": action, "data": data or {}}
+    with _state_lock:
+        STATE.setdefault("pending_input", {})[str(user_id)] = {"action": action, "data": data or {}}
+        save_state_locked()
+        log.info("set_pending_input: user=%s action=%s", user_id, action)
 
 
 def get_pending_input(user_id):
-    with _pending_input_lock:
-        return _pending_input.get(user_id)
+    with _state_lock:
+        return STATE.get("pending_input", {}).get(str(user_id))
 
 
 def clear_pending_input(user_id):
-    with _pending_input_lock:
-        _pending_input.pop(user_id, None)
+    with _state_lock:
+        STATE.setdefault("pending_input", {}).pop(str(user_id), None)
+        save_state_locked()
 
 
 # ---------- Telegram API helper funksiyalar ----------
@@ -726,7 +735,16 @@ STATE = load_state()
 def _upload_state_document(method_extra_fields=None, message_id=None):
     """STATE'ni JSON fayl sifatida DB guruhga yuboradi/yangilaydi.
     Qaytaradi: (ok, response_dict)"""
-    payload = json.dumps(STATE, ensure_ascii=False).encode("utf-8")
+    try:
+        payload = json.dumps(STATE, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as e:
+        # STATE ichiga JSON-mos bo'lmagan narsa (masalan xom bytes) tushib
+        # qolgan bo'lishi mumkin — bu butun saqlash zanjirini abadiy
+        # to'xtatib qo'ymasligi kerak, shuning uchun aniq log bilan
+        # to'xtaymiz (chaqiruvchi False ko'rib qayta uradi, lekin ildiz
+        # sababi log'da ko'rinadi va tuzatish oson bo'ladi).
+        log.error("STATE JSON-serialize qilib bo'lmadi (STATE buzilgan bo'lishi mumkin): %s", e)
+        return False, {}
     files = {"document": ("state.json", payload, "application/json")}
     if message_id:
         media = json.dumps({"type": "document", "media": "attach://document"})
@@ -2375,13 +2393,26 @@ def extract_tgs_from_zip(zip_bytes):
     return items
 
 
+def _encode_tgs_items(tgs_items):
+    """tgs_items: [(filename, bytes), ...] -> JSON-mos (base64) shaklga
+    o'giradi. pending_input endi STATE (persistent, JSON) ichida
+    saqlanadi, shuning uchun xom bytes'ni to'g'ridan-to'g'ri saqlab
+    bo'lmaydi — bu jimgina JSON-serialize xatosiga va butun state
+    saqlanishining to'xtab qolishiga olib kelardi."""
+    return [(name, base64.b64encode(content).decode("ascii")) for name, content in tgs_items]
+
+
+def _decode_tgs_items(encoded_items):
+    return [(name, base64.b64decode(b64)) for name, b64 in encoded_items]
+
+
 def _run_publish_flow(user_id, data):
     """Barcha publish manbalari (ZIP, bitta sticker, butun pack, ID)
     uchun UMUMIY yakuniy bosqich: narxni tekshiradi, avval Stars
     hamyonidan yechishga urinadi, yetmasa Telegram Stars invoice
     so'raydi (to'lansa keyinroq bu funksiya yana chaqiriladi), keyin
     haqiqiy sticker/emoji to'plamini yaratadi."""
-    tgs_items = data["tgs_items"]
+    tgs_items = _decode_tgs_items(data["tgs_items"])
     title = data["title"]
     sticker_type = data["sticker_type"]
     emoji = data["emoji"]
@@ -2465,7 +2496,7 @@ def _handle_single_publish_request_sync(chat_id, pending, requester_id):
     tgs_items = [("sticker.tgs", content)]
     set_pending_input(
         requester_id, "zip_publish_title",
-        {"tgs_items": tgs_items, "chat_id": chat_id, "reply_to": None, "business_connection_id": None},
+        {"tgs_items": _encode_tgs_items(tgs_items), "chat_id": chat_id, "reply_to": None, "business_connection_id": None},
     )
     price = get_limit_config()["publish_price_stars"]
     wallet = get_stars_wallet(requester_id)
@@ -2506,7 +2537,7 @@ def _handle_pack_publish_request_sync(chat_id, pack_name, requester_id):
 
     set_pending_input(
         requester_id, "zip_publish_title",
-        {"tgs_items": tgs_items, "chat_id": chat_id, "reply_to": None, "business_connection_id": None},
+        {"tgs_items": _encode_tgs_items(tgs_items), "chat_id": chat_id, "reply_to": None, "business_connection_id": None},
     )
     price = get_limit_config()["publish_price_stars"]
     wallet = get_stars_wallet(requester_id)
@@ -2854,7 +2885,7 @@ def _handle_zip_publish_request_sync(chat_id, msg, requester_info, requester_id,
 
     set_pending_input(
         requester_id, "zip_publish_title",
-        {"tgs_items": tgs_items,
+        {"tgs_items": _encode_tgs_items(tgs_items),
          "chat_id": chat_id, "reply_to": reply_to, "business_connection_id": business_connection_id},
     )
     price = get_limit_config()["publish_price_stars"]
