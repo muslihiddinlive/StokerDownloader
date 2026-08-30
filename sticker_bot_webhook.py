@@ -5249,6 +5249,33 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
 
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
+    """Tashqi wrapper: webhook ichida ISTALGAN joyda kutilmagan xato
+    chiqsa ham (masalan tarmoq, kod xatosi va h.k.), bu funksiya uni
+    ushlab, log'ga yozadi va Telegram'ga baribir 200 OK qaytaradi.
+    ILGARI bu himoya yo'q edi — agar biror joyda exception chiqsa,
+    Flask 500 qaytarardi va FOYDALANUVCHI HECH QANDAY XABAR OLMASDI
+    (na natija, na xato xabari) - aynan shu 'javob bermayapti'
+    muammosining eng ehtimolli sababi shu edi."""
+    try:
+        return _webhook_impl()
+    except Exception as e:
+        log.exception("webhook() da kutilmagan xato: %s", e)
+        try:
+            update = request.get_json(force=True, silent=True) or {}
+            msg = update.get("message") or {}
+            chat_id = msg.get("chat", {}).get("id")
+            if not chat_id:
+                cq = update.get("callback_query") or {}
+                chat_id = cq.get("message", {}).get("chat", {}).get("id")
+            if chat_id:
+                send_message(chat_id, "⚠️ Kutilmagan xatolik yuz berdi. Qaytadan urinib ko'ring yoki /start bosing.")
+            notify_admin(f"🔥 webhook() kutilmagan xato: {e}\nUpdate: {json.dumps(update, ensure_ascii=False)[:500]}")
+        except Exception:
+            log.exception("Xato haqida xabar berishning o'zi ham muvaffaqiyatsiz bo'ldi")
+        return {"ok": True}
+
+
+def _webhook_impl():
     global STATE
     update = request.get_json(force=True)
 
