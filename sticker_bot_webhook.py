@@ -4337,6 +4337,7 @@ def _extract_custom_emoji_id(text, entities):
 def handle_pending_input(chat_id, user_id, text, entities=None):
     """True qaytarsa — xabar shu yerda to'liq qayta ishlangan (webhook to'xtaydi)."""
     pending = get_pending_input(user_id)
+    log.info("handle_pending_input: user=%s text=%r pending=%r", user_id, text, pending)
     if not pending:
         return False
 
@@ -4640,17 +4641,21 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         try:
             amount = int(text.strip())
         except ValueError:
+            log.info("buy_wallet_amount: user=%s ValueError text=%r", user_id, text)
             send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
             return True
         if amount < 1 or amount > 10000:
+            log.info("buy_wallet_amount: user=%s out of range amount=%s", user_id, amount)
             send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
             return True
+        log.info("buy_wallet_amount: user=%s calling sendInvoice amount=%s", user_id, amount)
         result = tg_call(
             "sendInvoice", chat_id=chat_id, title=f"{amount} Stars hamyonga to'ldirish",
             description=f"{amount} Stars hamyoningizga qo'shiladi va publish kabi xizmatlar uchun ishlatishingiz mumkin bo'ladi.",
             payload=f"topup_wallet:{amount}:{user_id}", provider_token="", currency="XTR",
             prices=[{"label": f"{amount} Stars hamyon to'ldirish", "amount": amount}],
         )
+        log.info("buy_wallet_amount: user=%s sendInvoice result=%r", user_id, result)
         if not result or not result.get("ok"):
             err = result.get("description", "noma'lum xato") if result else "javob yo'q"
             send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
