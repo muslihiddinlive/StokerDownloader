@@ -4672,53 +4672,67 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
 
     if action == "buy_limit_amount":
         clear_pending_input(user_id)
+        log.info("buy_limit_amount: BLOKKA KIRDI user=%s text=%r", user_id, text)
         try:
-            amount = int(text.strip())
-        except ValueError:
-            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
-            return True
-        if amount < 1 or amount > 10000:
-            send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
-            return True
-        cfg = get_limit_config()
-        ratio = cfg["stars_per_limit"]
-        gained = amount * ratio
-        result = tg_call(
-            "sendInvoice", chat_id=chat_id, title=f"{gained} ta qo'shimcha limit",
-            description=f"{amount} Stars to'lab, {gained} ta qo'shimcha so'rov limiti olasiz (bir martalik, bonus sifatida qo'shiladi).",
-            payload=f"buy_limit:{amount}:{user_id}", provider_token="", currency="XTR",
-            prices=[{"label": f"{gained} ta limit", "amount": amount}],
-        )
-        if not result or not result.get("ok"):
-            err = result.get("description", "noma'lum xato") if result else "javob yo'q"
-            send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
-            notify_admin_error(f"Qo'shimcha limit sotib olish invoice ({amount} Stars)", user_id=user_id, extra=err)
+            try:
+                amount = int(text.strip())
+            except ValueError:
+                send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+                return True
+            if amount < 1 or amount > 10000:
+                send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+                return True
+            cfg = get_limit_config()
+            ratio = cfg["stars_per_limit"]
+            gained = amount * ratio
+            log.info("buy_limit_amount: user=%s calling sendInvoice amount=%s gained=%s", user_id, amount, gained)
+            result = tg_call(
+                "sendInvoice", chat_id=chat_id, title=f"{gained} ta qo'shimcha limit",
+                description=f"{amount} Stars to'lab, {gained} ta qo'shimcha so'rov limiti olasiz (bir martalik, bonus sifatida qo'shiladi).",
+                payload=f"buy_limit:{amount}:{user_id}", provider_token="", currency="XTR",
+                prices=[{"label": f"{gained} ta limit", "amount": amount}],
+            )
+            log.info("buy_limit_amount: user=%s sendInvoice result=%r", user_id, result)
+            if not result or not result.get("ok"):
+                err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+                send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
+                notify_admin_error(f"Qo'shimcha limit sotib olish invoice ({amount} Stars)", user_id=user_id, extra=err)
+        except Exception as e:
+            log.exception("buy_limit_amount: KUTILMAGAN XATO user=%s: %s", user_id, e)
+            notify_admin_error("Qo'shimcha limit sotib olish (kutilmagan xato)", user_id=user_id, extra=str(e))
+            send_message(chat_id, "⚠️ Kutilmagan xatolik. Qaytadan urinib ko'ring.", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "buy_wallet_amount":
         clear_pending_input(user_id)
+        log.info("buy_wallet_amount: BLOKKA KIRDI user=%s text=%r", user_id, text)
         try:
-            amount = int(text.strip())
-        except ValueError:
-            log.info("buy_wallet_amount: user=%s ValueError text=%r", user_id, text)
-            send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
-            return True
-        if amount < 1 or amount > 10000:
-            log.info("buy_wallet_amount: user=%s out of range amount=%s", user_id, amount)
-            send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
-            return True
-        log.info("buy_wallet_amount: user=%s calling sendInvoice amount=%s", user_id, amount)
-        result = tg_call(
-            "sendInvoice", chat_id=chat_id, title=f"{amount} Stars hamyonga to'ldirish",
-            description=f"{amount} Stars hamyoningizga qo'shiladi va publish kabi xizmatlar uchun ishlatishingiz mumkin bo'ladi.",
-            payload=f"topup_wallet:{amount}:{user_id}", provider_token="", currency="XTR",
-            prices=[{"label": f"{amount} Stars hamyon to'ldirish", "amount": amount}],
-        )
-        log.info("buy_wallet_amount: user=%s sendInvoice result=%r", user_id, result)
-        if not result or not result.get("ok"):
-            err = result.get("description", "noma'lum xato") if result else "javob yo'q"
-            send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
-            notify_admin_error(f"Hamyon to'ldirish invoice ({amount} Stars)", user_id=user_id, extra=err)
+            try:
+                amount = int(text.strip())
+            except ValueError:
+                log.info("buy_wallet_amount: user=%s ValueError text=%r", user_id, text)
+                send_message(chat_id, "Butun son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+                return True
+            if amount < 1 or amount > 10000:
+                log.info("buy_wallet_amount: user=%s out of range amount=%s", user_id, amount)
+                send_message(chat_id, "1 dan 10000 gacha son kiriting. Bekor qilindi.", reply_markup=back_to_menu_keyboard())
+                return True
+            log.info("buy_wallet_amount: user=%s calling sendInvoice amount=%s", user_id, amount)
+            result = tg_call(
+                "sendInvoice", chat_id=chat_id, title=f"{amount} Stars hamyonga to'ldirish",
+                description=f"{amount} Stars hamyoningizga qo'shiladi va publish kabi xizmatlar uchun ishlatishingiz mumkin bo'ladi.",
+                payload=f"topup_wallet:{amount}:{user_id}", provider_token="", currency="XTR",
+                prices=[{"label": f"{amount} Stars hamyon to'ldirish", "amount": amount}],
+            )
+            log.info("buy_wallet_amount: user=%s sendInvoice result=%r", user_id, result)
+            if not result or not result.get("ok"):
+                err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+                send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
+                notify_admin_error(f"Hamyon to'ldirish invoice ({amount} Stars)", user_id=user_id, extra=err)
+        except Exception as e:
+            log.exception("buy_wallet_amount: KUTILMAGAN XATO user=%s: %s", user_id, e)
+            notify_admin_error("Hamyon to'ldirish (kutilmagan xato)", user_id=user_id, extra=str(e))
+            send_message(chat_id, "⚠️ Kutilmagan xatolik. Qaytadan urinib ko'ring.", reply_markup=back_to_menu_keyboard())
         return True
 
     if action == "edit_premium_price":
