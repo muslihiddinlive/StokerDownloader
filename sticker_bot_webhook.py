@@ -349,7 +349,7 @@ def run_safe_thread(target, *args, chat_id=None, reply_to=None, business_connect
             fn_name = getattr(target, "__name__", str(target))
             log.exception("Thread xatosi (%s): %s", fn_name, e)
             try:
-                notify_admin(f"🔥 Ichki xatolik ({fn_name}): {e}")
+                notify_admin_error(f"Fon jarayoni ({fn_name})", extra=f"chat_id={chat_id}: {e}")
             except Exception:
                 pass
             if chat_id is not None:
@@ -582,6 +582,37 @@ def send_document_by_file_id(chat_id, file_id, caption=None, business_connection
 def notify_admin(text):
     if SUPERADMIN_ID:
         send_message(SUPERADMIN_ID, text)
+
+
+def user_label_for_admin(user_id):
+    """Adminga xabar berishda foydalanuvchini aniqlash uchun qulay yorliq
+    ('@username (id:123)' yoki 'Ism (id:123)' yoki oddiy 'id:123')."""
+    if user_id is None:
+        return "noma'lum"
+    try:
+        record = get_user_record(user_id)
+    except Exception:
+        record = {}
+    username = record.get("username")
+    first_name = record.get("first_name")
+    if username:
+        return f"@{username} (id:{user_id})"
+    if first_name:
+        return f"{first_name} (id:{user_id})"
+    return f"id:{user_id}"
+
+
+def notify_admin_error(action, user_id=None, extra=""):
+    """Botning ISTALGAN joyida xato/muvaffaqiyatsizlik yuz berganda
+    superadminga izchil formatda xabar yuboradi: KIM, QACHON, NIMA
+    qilayotganda xato chiqdi. Har doim shu formatdan foydalaning —
+    tarqoq/formatlanmagan notify_admin() chaqiruvlariga alternativ."""
+    when = datetime.now(timezone(timedelta(hours=5))).strftime("%Y-%m-%d %H:%M:%S")  # Asia/Tashkent
+    who = user_label_for_admin(user_id)
+    text = f"🔥 Xatolik\nKimda: {who}\nQachon: {when} (UZ vaqti)\nAmal: {action}"
+    if extra:
+        text += f"\nTafsilot: {extra}"
+    notify_admin(text)
 
 
 def react(chat_id, message_id, emoji=None, custom_emoji_id=None):
@@ -2468,6 +2499,8 @@ def _run_publish_flow(user_id, data):
                 err = result.get("description", "noma'lum xato") if result else "javob yo'q"
                 send_message(pub_chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}",
                              reply_to=reply_to, business_connection_id=bc_id)
+                notify_admin_error(f"Publish uchun hamyon to'ldirish invoice ({need} Stars)",
+                                    user_id=user_id, extra=err)
             return
 
     send_message(pub_chat_id, f"⏳ {len(tgs_items)} ta sticker publish qilinmoqda, kuting...",
@@ -3217,6 +3250,7 @@ def handle_callback_query(cq):
         if not result or not result.get("ok"):
             err = result.get("description", "noma'lum xato") if result else "javob yo'q"
             send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
+            notify_admin_error("Premium sotib olish invoice", user_id=user_id, extra=err)
         return
 
     if data == "buy_limit_custom":
@@ -4658,6 +4692,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         if not result or not result.get("ok"):
             err = result.get("description", "noma'lum xato") if result else "javob yo'q"
             send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
+            notify_admin_error(f"Qo'shimcha limit sotib olish invoice ({amount} Stars)", user_id=user_id, extra=err)
         return True
 
     if action == "buy_wallet_amount":
@@ -4683,6 +4718,7 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         if not result or not result.get("ok"):
             err = result.get("description", "noma'lum xato") if result else "javob yo'q"
             send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
+            notify_admin_error(f"Hamyon to'ldirish invoice ({amount} Stars)", user_id=user_id, extra=err)
         return True
 
     if action == "edit_premium_price":
@@ -5327,13 +5363,16 @@ def webhook():
         try:
             update = request.get_json(force=True, silent=True) or {}
             msg = update.get("message") or {}
+            cq = update.get("callback_query") or {}
+            from_user = msg.get("from") or cq.get("from") or {}
+            uid = from_user.get("id")
             chat_id = msg.get("chat", {}).get("id")
             if not chat_id:
-                cq = update.get("callback_query") or {}
                 chat_id = cq.get("message", {}).get("chat", {}).get("id")
+            action = msg.get("text") or (f"callback:{cq.get('data')}" if cq else None) or "(matn/callback yo'q)"
             if chat_id:
                 send_message(chat_id, "⚠️ Kutilmagan xatolik yuz berdi. Qaytadan urinib ko'ring yoki /start bosing.")
-            notify_admin(f"🔥 webhook() kutilmagan xato: {e}\nUpdate: {json.dumps(update, ensure_ascii=False)[:500]}")
+            notify_admin_error(f"webhook() kutilmagan xato — amal: {action!r}", user_id=uid, extra=str(e))
         except Exception:
             log.exception("Xato haqida xabar berishning o'zi ham muvaffaqiyatsiz bo'ldi")
         return {"ok": True}
