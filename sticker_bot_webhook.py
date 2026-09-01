@@ -2456,12 +2456,18 @@ def _run_publish_flow(user_id, data):
                 f"Yetishmagan {need} ⭐'ni to'lang — to'lov tasdiqlangach avtomatik davom etadi.",
                 reply_to=reply_to, business_connection_id=bc_id,
             )
-            tg_call(
+            log.info("publish topup: user=%s pub_chat_id=%s need=%s calling sendInvoice", user_id, pub_chat_id, need)
+            result = tg_call(
                 "sendInvoice", chat_id=pub_chat_id, title=f"Publish uchun {need} Stars",
                 description="To'langach, avval boshlagan publish so'rovingiz avtomatik davom etadi.",
                 payload=f"topup_wallet:{need}:{user_id}", provider_token="", currency="XTR",
                 prices=[{"label": f"{need} Stars", "amount": need}],
             )
+            log.info("publish topup: user=%s sendInvoice result=%r", user_id, result)
+            if not result or not result.get("ok"):
+                err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+                send_message(pub_chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}",
+                             reply_to=reply_to, business_connection_id=bc_id)
             return
 
     send_message(pub_chat_id, f"⏳ {len(tgs_items)} ta sticker publish qilinmoqda, kuting...",
@@ -3200,12 +3206,17 @@ def handle_callback_query(cq):
         price = cfg["premium_price_stars"]
         days = cfg["premium_days"]
         months = round(days / 30.4, 1)
-        tg_call(
+        log.info("buy_premium: user=%s chat_id=%s price=%s calling sendInvoice", user_id, chat_id, price)
+        result = tg_call(
             "sendInvoice", chat_id=chat_id, title=f"StokerDownloader Premium ({months} oy)",
             description=f"Cheksiz pack yuklab olish, kunlik/haftalik limitlarsiz — {months} oy muddatga.",
             payload=f"premium:{user_id}", provider_token="", currency="XTR",
             prices=[{"label": f"Premium {months} oy", "amount": price}],
         )
+        log.info("buy_premium: user=%s sendInvoice result=%r", user_id, result)
+        if not result or not result.get("ok"):
+            err = result.get("description", "noma'lum xato") if result else "javob yo'q"
+            send_message(chat_id, f"⚠️ To'lov havolasini yaratishda xato: {err}", reply_markup=back_to_menu_keyboard())
         return
 
     if data == "buy_limit_custom":
