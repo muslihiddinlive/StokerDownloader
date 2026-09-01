@@ -4828,12 +4828,42 @@ def get_business_owner(connection_id):
         return conn.get("owner_id") if conn else None
 
 
-def get_business_connection_id(owner_id):
-    """Berilgan userning HOZIRGI faol business_connection_id'sini topadi (aksincha qidiruv)."""
+def refresh_business_connection(conn_id):
+    """Telegram'dan business connection'ning HAQIQIY joriy holatini so'raydi va
+    lokal keshni shunga moslab yangilaydi. Bu, webhook o'tkazib yuborilgan bo'lsa
+    (masalan hosting bir muddat uxlab qolgan / qayta ishga tushgan payt), lokal
+    'enabled' bayrog'i abadiy eskirib qolib qolishining oldini oladi."""
+    data = tg_call("getBusinessConnection", business_connection_id=conn_id)
+    if not data or not data.get("ok"):
+        return None
+    result = data["result"]
+    owner = result.get("user", {})
     with _state_lock:
-        for conn_id, conn in STATE.get("business_connections", {}).items():
-            if conn.get("owner_id") == owner_id and conn.get("enabled", True):
-                return conn_id
+        entry = STATE.setdefault("business_connections", {}).setdefault(conn_id, {})
+        entry["owner_id"] = owner.get("id", entry.get("owner_id"))
+        entry["enabled"] = result.get("is_enabled", entry.get("enabled", False))
+        entry["first_name"] = owner.get("first_name", entry.get("first_name", ""))
+        entry["last_name"] = owner.get("last_name", entry.get("last_name", ""))
+        save_state_locked()
+        return dict(entry)
+
+
+def get_business_connection_id(owner_id):
+    """Berilgan userning HOZIRGI faol business_connection_id'sini topadi (aksincha
+    qidiruv). Kesh 'o'chirilgan' (enabled=False) deb ko'rsatgan ulanishlar uchun ham
+    Telegram'dan JONLI holatni tekshiradi — o'tkazib yuborilgan webhook tufayli
+    kesh noto'g'ri qotib qolmasligi uchun (pastdagi refresh_business_connection'ga
+    qarang)."""
+    with _state_lock:
+        snapshot = list(STATE.get("business_connections", {}).items())
+    for conn_id, conn in snapshot:
+        if conn.get("owner_id") != owner_id:
+            continue
+        if conn.get("enabled", True):
+            return conn_id
+        refreshed = refresh_business_connection(conn_id)
+        if refreshed and refreshed.get("enabled"):
+            return conn_id
     return None
 
 
