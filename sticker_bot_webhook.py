@@ -71,6 +71,7 @@ import imageio_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sticker-bot")
+log.info("=== Bot process ishga tushdi (bio_clock live-refresh patch bilan) ===")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SUPERADMIN_ID = int(os.environ["SUPERADMIN_ID"])
@@ -4833,18 +4834,23 @@ def refresh_business_connection(conn_id):
     lokal keshni shunga moslab yangilaydi. Bu, webhook o'tkazib yuborilgan bo'lsa
     (masalan hosting bir muddat uxlab qolgan / qayta ishga tushgan payt), lokal
     'enabled' bayrog'i abadiy eskirib qolib qolishining oldini oladi."""
+    log.info("Bio soat: conn=%s uchun Telegram'dan JONLI holat so'ralmoqda...", conn_id)
     data = tg_call("getBusinessConnection", business_connection_id=conn_id)
     if not data or not data.get("ok"):
+        log.warning("Bio soat: conn=%s uchun getBusinessConnection MUVAFFAQIYATSIZ: %s", conn_id, data)
         return None
     result = data["result"]
     owner = result.get("user", {})
     with _state_lock:
         entry = STATE.setdefault("business_connections", {}).setdefault(conn_id, {})
+        old_enabled = entry.get("enabled")
         entry["owner_id"] = owner.get("id", entry.get("owner_id"))
         entry["enabled"] = result.get("is_enabled", entry.get("enabled", False))
         entry["first_name"] = owner.get("first_name", entry.get("first_name", ""))
         entry["last_name"] = owner.get("last_name", entry.get("last_name", ""))
         save_state_locked()
+        log.info("Bio soat: conn=%s Telegram javobi: is_enabled=%s (eski kesh: %s) to'liq javob: %s",
+                  conn_id, result.get("is_enabled"), old_enabled, result)
         return dict(entry)
 
 
