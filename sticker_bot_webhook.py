@@ -1876,6 +1876,18 @@ def _handle_pack_request_sync(chat_id, pack_name, requester_info, requester_id, 
     send_result = send_document_bytes(chat_id, f"{pack_name}.zip", zip_bytes, caption=f"{result} ta fayl topildi.", decoration_key="c1f84b9b9",
                                        business_connection_id=business_connection_id)
 
+    if not send_result.get("ok"):
+        # Pack muvaffaqiyatli qurildi, lekin foydalanuvchiga yetkazib bo'lmadi
+        # (tarmoq xatosi, fayl juda katta, Telegram API xatosi va h.k.) —
+        # bu holatda ham kesh yo'lidagi kabi band qilingan limit slot
+        # qaytarilishi kerak, aks holda foydalanuvchi hech narsa olmay
+        # turib limitidan yutqazadi.
+        release_request_slot(requester_id)
+        send_message(chat_id, "Yuborishda xato yuz berdi. Qayta urinib ko'ring.", reply_to=reply_to,
+                     business_connection_id=business_connection_id)
+        notify_admin(f"⚠️ Pack qurildi, lekin yuborib bo'lmadi\nKimdan: {requester_info}\nPack: {pack_name}\nJavob: {send_result}")
+        return
+
     if CACHE_GROUP_ID:
         cache_result = send_document_bytes(CACHE_GROUP_ID, f"{pack_name}.zip", zip_bytes)
         if cache_result.get("ok"):
@@ -3777,7 +3789,7 @@ def handle_callback_query(cq):
         set_pending_input(user_id, "post_channel_text", {"channel_id": cid, "channel_title": title})
         safe_edit_or_send(
             chat_id, message_id,
-            f"Matn yozing. Emoji ID ni [ID] shaklida yozing.",
+            "Matn yozing. Emoji ID ni [ID] shaklida yozing.",
             reply_markup=back_to_panel_keyboard(),
         )
         return
@@ -5281,7 +5293,6 @@ def webhook():
 
 
 def _webhook_impl():
-    global STATE
     update = request.get_json(force=True)
 
     if time.time() - _bio_clock_state["last_tick"] > 45:
