@@ -4400,6 +4400,11 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         return False
 
     action = pending["action"]
+    if action in ("buy_wallet_amount", "buy_limit_amount"):
+        try:
+            notify_admin(f"🔎 DEBUG: action ajratildi = {action!r} (turi: {type(action).__name__}), user={user_id}, text={text!r}")
+        except Exception:
+            pass
 
     if action == "zip_publish_title":
         clear_pending_input(user_id)
@@ -4872,6 +4877,8 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         send_message(chat_id, f"📣 Xabar {sent} ta foydalanuvchiga yuborildi.", decoration_key="m3649b7e8", reply_markup=back_to_panel_keyboard())
         return True
 
+    log.warning("handle_pending_input: HECH BIR action mos kelmadi (fallback) — action=%r user=%s", action, user_id)
+    notify_admin(f"🔎 DEBUG: handle_pending_input FALLBACK'ga tushdi — action={action!r}, user={user_id}")
     clear_pending_input(user_id)
     return False
 
