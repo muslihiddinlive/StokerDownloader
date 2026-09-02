@@ -676,6 +676,7 @@ def default_state():
         "stats": {"total_requests": 0},
         "business_connections": {},  # {connection_id: {"owner_id": int, "enabled": bool}}
         "keywords": {},  # {str(owner_id): [{"id","trigger","type"("exact"/"any"),"response"}]}
+        "processed_payments": [],  # [telegram_payment_charge_id, ...] — dublikat to'lovni oldini olish uchun
     }
 
 
@@ -722,6 +723,7 @@ def _merge_with_defaults(loaded):
         merged[key] = d
     for key in ("groups", "channels"):
         merged.setdefault(key, {})
+    merged.setdefault("processed_payments", [])
     return merged
 
 
@@ -5480,6 +5482,31 @@ def _webhook_impl():
         # Telegram tomonidan tasdiqlangan, payload esa faqat bizning
         # ichki belgimiz.
         total_amount = successful_payment.get("total_amount", 0)
+
+        # DUBLIKAT HIMOYASI: Telegram webhook'ni bot vaqtida javob
+        # bermasa (masalan Render qayta ishga tushayotgan bo'lsa yoki
+        # so'rov tarmoqda kechiksa) QAYTA yuborishi mumkin — shu bitta
+        # to'lov ikkinchi marta kelib, foydalanuvchiga limit/wallet/
+        # premium IKKI MARTA berilib qolishining oldini olamiz.
+        # telegram_payment_charge_id har bir muvaffaqiyatli to'lov uchun
+        # Telegram tomonidan beriladigan noyob identifikator.
+        charge_id = successful_payment.get("telegram_payment_charge_id")
+        if charge_id:
+            with _state_lock:
+                already_processed = charge_id in STATE["processed_payments"]
+                if not already_processed:
+                    STATE["processed_payments"].append(charge_id)
+                    # ro'yxat cheksiz o'smasligi uchun oxirgi 2000 tasini saqlaymiz
+                    if len(STATE["processed_payments"]) > 2000:
+                        STATE["processed_payments"] = STATE["processed_payments"][-2000:]
+                    save_state_locked()
+            if already_processed:
+                log.warning("Dublikat to'lov update'i e'tiborsiz qoldirildi: charge_id=%s, payer=%s", charge_id, payer_id)
+                return {"ok": True}
+        else:
+            # charge_id yo'q holat amalda bo'lmasligi kerak, lekin
+            # ehtiyot shart bo'lsa ham adminga xabar beramiz.
+            log.warning("successful_payment'da telegram_payment_charge_id topilmadi (payer=%s)", payer_id)
 
         if payload.startswith("buy_limit:"):
             cfg = get_limit_config()
