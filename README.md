@@ -1,59 +1,86 @@
-# StokerDownloader
+# StokerDownloader 🎯
 
-Telegram sticker/custom emoji pack downloader bot (webhook mode, Render deployment).
+> **Telegram sticker & custom emoji pack downloader** — get file IDs, ZIP entire packs, post with custom emojis — all without Telegram Premium.
 
-## Ishlash tartibi
+🤖 **Live bot:** [@ThehackerRobot](https://t.me/ThehackerRobot)
 
-Foydalanuvchi stiker/custom emoji forward qiladi yoki `/getpack <pack_nomi>` yuboradi.
-Bot pack ichidagi barcha fayllarni (`.tgs` / `.webp` / `.webm`) topib, ZIP qilib yuboradi.
-Har bir so'rov haqida superadminga darhol xabar boradi.
+---
 
-## 🆕 Yangi: Kanalga custom emoji bilan post yuborish
+## ✨ Features
 
-Superadmin panelida **"📤 Kanalga post (emoji bilan)"** tugmasi orqali:
+- 📦 **Pack downloader** — Forward any sticker/emoji or send `/getpack <pack_name>` to get a full ZIP (`.tgs` / `.webp` / `.webm`)
+- 🆔 **ID extractor** — Get custom emoji & sticker IDs instantly (forward, paste pack link, or drop the file — all work)
+- 📤 **Post with custom emoji** — Send channel posts with premium custom emojis via ID, no Premium needed on user side
+- 👑 **Superadmin panel** — Full control: user management, bonus/premium system, broadcast, paginated channel list
+- 🗄️ **Zero-cost DB** — Telegram supergroup as database (no external DB needed)
+- ⚡ **Debounced state** — Fast sequential updates merged into one write; critical actions (admin add, premium grant) written instantly
+- 🔄 **Webhook mode** — Runs on Render free tier with UptimeRobot keepalive
 
-1. Bot admin bo'lgan kanallar ro'yxatidan birini tanlaysiz (sahifalab ko'rsatiladi)
-2. Post matnini yozasiz — custom/premium emoji kerak bo'lgan joyga uning ID'sini
-   `[5458672011788167217]` shaklida yozasiz
-3. Bot matnni to'g'ri `custom_emoji` entity bilan tanlangan kanalga yuboradi
+---
 
-Emoji ID'sini olish uchun — botga o'sha custom emojini forward qiling yoki havolasini
-tashlang, bot mavjud "🆔 ID sini berish" funksiyasi orqali ID'ni qaytaradi.
+## 🚀 Quick Deploy (Render)
 
-Texnik eslatma: bu funksiya ishlashi uchun bot **owner**'ining (BotFather orqali
-ownership transfer qilingan akkauntning) Telegram Premium obunasi bo'lishi kerak —
-aks holda `custom_emoji` entity Telegram tomonidan qabul qilinmaydi.
+1. Fork this repo & connect to [Render](https://render.com) → **New Web Service**
+2. **Build command:** `pip install -r requirements.txt`
+3. **Start command:** `gunicorn sticker_bot_webhook:app --workers 1`
+4. Set environment variables:
 
-## Render'da deploy qilish
+| Variable | Description |
+|---|---|
+| `BOT_TOKEN` | Your bot token from [@BotFather](https://t.me/BotFather) |
+| `SUPERADMIN_ID` | Your Telegram user ID (get from [@userinfobot](https://t.me/userinfobot)) |
+| `WEBHOOK_URL` | Your Render domain e.g. `https://stokerdownloader.onrender.com` |
+| `DB_GROUP_ID` | Telegram supergroup ID used as database |
+| `CACHE_GROUP_ID` | *(Optional)* Group for caching ZIP files |
+| `PORT` | Set automatically by Render |
 
-1. Bu repo'ni Render'ga ulang (New Web Service)
-2. Build command: `pip install -r requirements.txt`
-3. Start command: `python sticker_bot_webhook.py`
-4. Environment Variables:
-   - `BOT_TOKEN` — bot tokeni (@BotFather)
-   - `SUPERADMIN_ID` — sizning Telegram user ID (@userinfobot orqali)
-   - `WEBHOOK_URL` — Render bergan domen, masalan `https://stokerdownloader.onrender.com`
-   - `DB_GROUP_ID` — DB sifatida ishlatiladigan Telegram guruh ID'si
-   - `CACHE_GROUP_ID` — (ixtiyoriy) Pack ZIP fayllarini keshlash uchun guruh ID'si
-   - `PORT` — Render avtomatik beradi
+> Webhook is registered automatically on first startup.
 
-Deploy tugagach, bot birinchi ishga tushganda avtomatik webhook o'rnatadi.
+---
 
-## Muhim
+## ⚠️ Important — 1 Worker Only
 
-Render Start Command'da bitta worker ishlatilishi kerak (state xotirada saqlanadi):
-
-```
+```bash
 gunicorn sticker_bot_webhook:app --workers 1
 ```
 
-⚠️ **`--workers 1` dan ORTIQ ishlatmang.** Har bir worker o'zining alohida
-xotira (RAM) nusxasiga ega bo'ladi — 2+ worker bilan ishga tushirilsa,
-foydalanuvchi limitlari, bonuslar va boshqa state ma'lumotlari **jimgina
-yo'qolishi yoki eskirishi mumkin** (workerlar bir-birining yozganini
-ko'rmaydi, oxirgi saqlagan worker g'olib chiqadi). Xato hech qanday log
-yoki bildirishnoma bermaydi — shuning uchun bu talab qat'iy.
+**Do NOT use more than 1 worker.** Each worker has its own RAM — with 2+ workers, user state (limits, bonuses, premium) will silently desync. No errors, no logs. This is a hard constraint.
 
-State endi debounce (2 soniyalik) bilan saqlanadi — tez ketma-ket kelgan
-o'zgarishlar bitta yozuvga birlashadi. Kritik amallar (admin qo'shish,
-bonus/premium berish) esa kutmasdan darhol yoziladi.
+---
+
+## 💡 How the "no Premium needed" trick works
+
+Telegram requires Premium to send `custom_emoji` entities. This bot works around it:
+- The **bot owner account** (transferred via BotFather) holds Premium
+- Users interact through the bot and never need their own Premium subscription
+- ID extraction works via forward, pack link, or direct file — all edge cases covered
+
+---
+
+## 🛠️ Stack
+
+| Layer | Tech |
+|---|---|
+| Language | Python 3 |
+| Bot framework | python-telegram-bot (webhook) |
+| Hosting | Render free tier + UptimeRobot |
+| Database | Telegram Supergroup |
+| State | In-memory with debounced persistence |
+
+---
+
+## 📄 License
+
+[MIT](LICENSE)
+
+---
+
+<details>
+<summary>🇺🇿 O'zbekcha qo'llanma</summary>
+
+Foydalanuvchi stiker/custom emoji forward qiladi yoki `/getpack <pack_nomi>` yuboradi.
+Bot pack ichidagi barcha fayllarni (`.tgs` / `.webp` / `.webm`) topib, ZIP qilib yuboradi.
+
+Deploy uchun yuqoridagi Render bo'limiga qarang.
+
+</details>
