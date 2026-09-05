@@ -579,9 +579,19 @@ def send_document_by_file_id(chat_id, file_id, caption=None, business_connection
     return tg_call("sendDocument", **params)
 
 
-def notify_admin(text):
+def notify_admin(text, reply_markup=None):
     if SUPERADMIN_ID:
-        send_message(SUPERADMIN_ID, text)
+        send_message(SUPERADMIN_ID, text, reply_markup=reply_markup)
+
+
+def dm_button_for_user(user_id):
+    """Adminga yuboriladigan log/xatolik xabarlariga qo'shiladigan tezkor
+    'Foydalanuvchiga yozish' tugmasi — mavjud dm_start:{uid} oqimidan foydalanadi."""
+    if user_id is None:
+        return None
+    return {"inline_keyboard": [[
+        {"text": "💬 Foydalanuvchiga yozish", "callback_data": f"dm_start:{user_id}"}
+    ]]}
 
 
 def user_label_for_admin(user_id):
@@ -612,7 +622,7 @@ def notify_admin_error(action, user_id=None, extra=""):
     text = f"🔥 Xatolik\nKimda: {who}\nQachon: {when} (UZ vaqti)\nAmal: {action}"
     if extra:
         text += f"\nTafsilot: {extra}"
-    notify_admin(text)
+    notify_admin(text, reply_markup=dm_button_for_user(user_id))
 
 
 def react(chat_id, message_id, emoji=None, custom_emoji_id=None):
@@ -3939,9 +3949,17 @@ def handle_callback_query(cq):
             nav.append({"text": "➡️", "callback_data": f"panel_dm_user:{page + 1}"})
         if nav:
             rows.append(nav)
+        rows.append([{"text": "🔍 ID orqali qidirish", "callback_data": "panel_dm_search_id"}])
         rows.append([{"text": "⬅️ Admin panel", "callback_data": "menu_admin_panel"}])
         safe_edit_or_send(chat_id, message_id, f"💬 Kimga xabar yubormoqchisiz? ({len(items)} foydalanuvchi)",
                            reply_markup={"inline_keyboard": rows})
+        return
+
+    if data == "panel_dm_search_id":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "dm_search_id", {})
+        safe_edit_or_send(chat_id, message_id, "🔍 Qidirilayotgan foydalanuvchining Telegram ID raqamini kiriting:",
+                           reply_markup=back_to_panel_keyboard())
         return
 
     if data.startswith("dm_start:"):
@@ -4404,7 +4422,12 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
     action = pending["action"]
     if action in ("buy_wallet_amount", "buy_limit_amount"):
         try:
-            notify_admin(f"🔎 DEBUG: action ajratildi = {action!r} (turi: {type(action).__name__}), user={user_id}, text={text!r}")
+            who = user_label_for_admin(user_id)
+            notify_admin(
+                f"🔎 DEBUG: action ajratildi = {action!r} (turi: {type(action).__name__}), "
+                f"user={who}, text={text!r}",
+                reply_markup=dm_button_for_user(user_id),
+            )
         except Exception:
             pass
 
@@ -4617,8 +4640,13 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                                    f"avto-javob ishga tushadi.", decoration_key="mb7d9bf2b", reply_markup=back_to_menu_keyboard())
         return True
 
-    # Quyidagilar faqat adminlar uchun ishlaydi:
-    if not is_admin(user_id):
+    # Faqat quyidagi amallar adminlar uchun mo'ljallangan — shuning uchun
+    # is_admin tekshiruvi FAQAT shu ro'yxatdagi action'lar uchun ishlaydi.
+    # (Oldin bu tekshiruv shartsiz edi va buy_limit_amount/buy_wallet_amount
+    # kabi ODDIY foydalanuvchilar uchun mo'ljallangan amallarni ham
+    # jimgina bloklab qo'yardi — bu BUG edi, tuzatildi.)
+    ADMIN_ONLY_ACTIONS = ("dm_text", "admin_message", "give_limit_amount", "dm_search_id")
+    if action in ADMIN_ONLY_ACTIONS and not is_admin(user_id):
         clear_pending_input(user_id)
         return True
 
@@ -4659,6 +4687,26 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             send_message(SUPERADMIN_ID, f"✉️ <b>{sender_label}</b> boshqa adminlarga xabar yubormoqchi:\n\n{msg_text}", decoration_key="m91979466",
                          parse_mode_html=True, reply_markup=keyboard)
             send_message(chat_id, "📨 Xabaringiz superadminga tasdiq uchun yuborildi.", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "dm_search_id":
+        clear_pending_input(user_id)
+        raw = text.strip().lstrip("@")
+        try:
+            target_id = int(raw)
+        except ValueError:
+            send_message(chat_id, "❌ Noto'g'ri format. Faqat Telegram ID (butun son) kiriting.",
+                         reply_markup=back_to_panel_keyboard())
+            return True
+        with _state_lock:
+            known = target_id in STATE["known_users"]
+        if not known:
+            send_message(chat_id, f"❌ id:{target_id} bazada topilmadi (bot bilan hali gaplashmagan bo'lishi mumkin).",
+                         reply_markup=back_to_panel_keyboard())
+            return True
+        set_pending_input(user_id, "dm_text", {"target_id": target_id})
+        send_message(chat_id, f"💬 {user_label(target_id)}ga yuboriladigan xabarni yozing:",
+                     reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "give_limit_amount":
