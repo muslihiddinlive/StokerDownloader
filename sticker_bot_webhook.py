@@ -687,6 +687,11 @@ def default_state():
         "business_connections": {},  # {connection_id: {"owner_id": int, "enabled": bool}}
         "keywords": {},  # {str(owner_id): [{"id","trigger","type"("exact"/"any"),"response"}]}
         "processed_payments": [],  # [telegram_payment_charge_id, ...] — dublikat to'lovni oldini olish uchun
+        "backup": {
+            "sources": {},  # {key: {owner_id, type, chat_id, title, username, business_connection_id, delivery_mode, delivery_target_chat_id, enabled_at}}
+            "log": {},      # {key: [{"ts","from_id","from_label","kind","file_id","text","orig_msg_id"}, ...]}
+        },
+        "backup_business_auto": {},  # {str(owner_id): {"enabled","delivery_mode","delivery_target_chat_id"}}
     }
 
 
@@ -734,6 +739,10 @@ def _merge_with_defaults(loaded):
     for key in ("groups", "channels"):
         merged.setdefault(key, {})
     merged.setdefault("processed_payments", [])
+    merged.setdefault("backup", {"sources": {}, "log": {}})
+    merged["backup"].setdefault("sources", {})
+    merged["backup"].setdefault("log", {})
+    merged.setdefault("backup_business_auto", {})
     return merged
 
 
@@ -1199,6 +1208,226 @@ def forget_channel(chat_id):
     with _state_lock:
         STATE.setdefault("channels", {}).pop(str(chat_id), None)
         save_state_locked()
+
+
+# ---------- Chat backup (guruh/kanal/shaxsiy chat arxivlash) ----------
+# MUHIM CHEKLOV: Bot API (oddiy ham, Business ulanish orqali ham) xabar
+# TARIXINI o'qiy olmaydi — faqat "hozirdan boshlab" kelayotgan yangi
+# xabarlarni webhook orqali ko'radi. Shuning uchun "backup" bu yerda —
+# yoqilgandan keyin kelgan xabarlarni yig'ib borish va so'rovga ko'ra
+# ZIP qilib berish degani (o'tmishni tiklab bo'lmaydi).
+#
+# Guruh/kanal uchun bot o'sha yerda ADMIN bo'lishi shart (aks holda
+# privacy mode tufayli faqat ba'zi xabarlarni ko'radi). Shaxsiy chat
+# uchun esa faqat Telegram Business ulanishi orqali ishlaydi (Business
+# ulanish faqat 1-1 shaxsiy chatlarga tegishli — guruh/kanalga tegishli
+# EMAS, Telegram buni shunday cheklagan).
+
+BACKUP_RANGES = [
+    ("1d", "🕐 Oxirgi 1 kun", 1),
+    ("1w", "📅 Oxirgi 1 hafta", 7),
+    ("1m", "🗓 Oxirgi 1 oy", 30),
+    ("1y", "📆 Oxirgi 1 yil", 365),
+]
+BACKUP_LOG_MAX_PER_SOURCE = 8000  # bitta chat uchun saqlanadigan maksimal yozuv soni
+BACKUP_RETAIN_DAYS = 400  # bundan eski yozuvlar avtomatik tozalanadi
+
+
+def backup_source_key(chat_id, business_connection_id=None):
+    """Guruh/kanal uchun kalit = str(chat_id). Shaxsiy (business) chat uchun
+    business_connection_id ham qo'shiladi — aks holda ikki xil business
+    egasi bitta xaridor bilan gaplashsa, chat_id bir xil bo'lib qolib,
+    ma'lumotlar aralashib ketishi mumkin edi."""
+    if business_connection_id:
+        return f"biz:{business_connection_id}:{chat_id}"
+    return str(chat_id)
+
+
+def get_backup_source(key):
+    with _state_lock:
+        return STATE.get("backup", {}).get("sources", {}).get(key)
+
+
+def get_backup_sources_for_owner(owner_id):
+    with _state_lock:
+        sources = STATE.get("backup", {}).get("sources", {})
+        return [dict(v, key=k) for k, v in sources.items() if v.get("owner_id") == owner_id]
+
+
+def enable_backup_source(key, owner_id, chat_type, chat_id, title, username=None,
+                          business_connection_id=None):
+    with _state_lock:
+        sources = STATE.setdefault("backup", {}).setdefault("sources", {})
+        existing = sources.get(key, {})
+        sources[key] = {
+            "owner_id": owner_id,
+            "type": chat_type,  # "group" | "channel" | "private"
+            "chat_id": chat_id,
+            "title": title,
+            "username": username,
+            "business_connection_id": business_connection_id,
+            "enabled_at": existing.get("enabled_at") or datetime.now(timezone.utc).isoformat(),
+            "delivery_mode": existing.get("delivery_mode", "zip_self"),
+            "delivery_target_chat_id": existing.get("delivery_target_chat_id"),
+        }
+        save_state_locked()
+
+
+def disable_backup_source(key):
+    with _state_lock:
+        STATE.setdefault("backup", {}).setdefault("sources", {}).pop(key, None)
+        STATE.setdefault("backup", {}).setdefault("log", {}).pop(key, None)
+        save_state_locked()
+
+
+def set_backup_delivery(key, mode, target_chat_id=None):
+    with _state_lock:
+        src = STATE.setdefault("backup", {}).setdefault("sources", {}).get(key)
+        if not src:
+            return False
+        src["delivery_mode"] = mode
+        src["delivery_target_chat_id"] = target_chat_id
+        save_state_locked()
+        return True
+
+
+def get_backup_business_auto(owner_id):
+    with _state_lock:
+        return STATE.get("backup_business_auto", {}).get(str(owner_id), {"enabled": False})
+
+
+def set_backup_business_auto(owner_id, enabled, delivery_mode="zip_self", delivery_target_chat_id=None):
+    with _state_lock:
+        cfg = STATE.setdefault("backup_business_auto", {}).setdefault(str(owner_id), {})
+        cfg["enabled"] = enabled
+        if enabled:
+            cfg["delivery_mode"] = delivery_mode
+            cfg["delivery_target_chat_id"] = delivery_target_chat_id
+        save_state_locked()
+
+
+def extract_generic_backup_content(msg):
+    """Xabardan (kind, file_id, text) ni umumiy holda ajratib oladi — backup
+    barcha turdagi xabarlarni yig'ishi kerak, shuning uchun mavjud
+    extract_single_sticker_file/extract_video_file kabi ixtisoslashgan
+    funksiyalar o'rniga shu umumiy versiyasi ishlatiladi."""
+    if msg.get("photo"):
+        return "photo", msg["photo"][-1]["file_id"], msg.get("caption", "")
+    for field, kind in (
+        ("video", "video"), ("document", "document"), ("voice", "voice"),
+        ("audio", "audio"), ("video_note", "video_note"),
+        ("animation", "animation"), ("sticker", "sticker"),
+    ):
+        if msg.get(field):
+            return kind, msg[field]["file_id"], msg.get("caption", "")
+    return "text", None, msg.get("text", "")
+
+
+def log_backup_message(key, msg, business_connection_id=None):
+    src = get_backup_source(key)
+    if not src:
+        return
+    from_user = msg.get("from", {}) or {}
+    kind, file_id, text = extract_generic_backup_content(msg)
+    entry = {
+        "ts": msg.get("date") or int(time.time()),
+        "from_id": from_user.get("id"),
+        "from_label": requester_label(from_user),
+        "kind": kind,
+        "file_id": file_id,
+        "text": (text or "")[:1000],
+        "orig_msg_id": msg.get("message_id"),
+    }
+    with _state_lock:
+        log_map = STATE.setdefault("backup", {}).setdefault("log", {})
+        entries = log_map.setdefault(key, [])
+        entries.append(entry)
+        cutoff = time.time() - BACKUP_RETAIN_DAYS * 86400
+        entries[:] = [e for e in entries if e["ts"] >= cutoff]
+        if len(entries) > BACKUP_LOG_MAX_PER_SOURCE:
+            del entries[:len(entries) - BACKUP_LOG_MAX_PER_SOURCE]
+        save_state_locked()
+
+    if src.get("delivery_mode") == "forward_group" and src.get("delivery_target_chat_id"):
+        run_safe_thread(
+            _relay_backup_message, src, entry, msg.get("chat", {}).get("id"), business_connection_id,
+        )
+
+
+def _relay_backup_message(src, entry, source_chat_id, business_connection_id):
+    target = src["delivery_target_chat_id"]
+    label = f"🗄 {src.get('title')}\n👤 {entry['from_label']} (id: {entry['from_id']})"
+    send_message(target, label)
+    try:
+        if business_connection_id:
+            # ESLATMA: bu Business xabari — oddiy forwardMessage bunday xabarlar
+            # uchun ishlamasligi mumkin (Telegram business chat'lar uchun alohida
+            # cheklov qo'ygan bo'lishi ehtimoli bor, jonli botda tekshirilishi kerak).
+            # copyMessage bilan urinamiz, ishlamasa hech bo'lmasa matn saqlanadi.
+            result = tg_call("copyMessage", chat_id=target, from_chat_id=source_chat_id,
+                              message_id=entry["orig_msg_id"])
+            if not result.get("ok") and entry.get("text"):
+                send_message(target, entry["text"])
+        else:
+            tg_call("forwardMessage", chat_id=target, from_chat_id=source_chat_id,
+                    message_id=entry["orig_msg_id"])
+    except Exception as e:
+        log.warning("Backup relay xato (source=%s): %s", source_chat_id, e)
+
+
+def _fetch_backup_file(i, entry):
+    try:
+        file_path = get_file_path(entry["file_id"])
+        if not file_path:
+            return i, None, None
+        content = download_file_bytes(file_path)
+        ext = os.path.splitext(file_path)[1] or ""
+        fname = f"{i:04d}_{entry['kind']}{ext}"
+        return i, fname, content
+    except Exception as e:
+        log.warning("Backup fayl yuklashda xato: %s", e)
+        return i, None, None
+
+
+def build_backup_zip(key, days):
+    with _state_lock:
+        entries = list(STATE.get("backup", {}).get("log", {}).get(key, []))
+    cutoff = time.time() - days * 86400
+    entries = [e for e in entries if e["ts"] >= cutoff]
+    if not entries:
+        return None, 0
+    media_jobs = [(i, e) for i, e in enumerate(entries, start=1) if e.get("file_id")]
+    results = {}
+    if media_jobs:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(_fetch_backup_file, i, e) for i, e in media_jobs]
+            for fut in concurrent.futures.as_completed(futures):
+                i, fname, content = fut.result()
+                if fname is not None:
+                    results[i] = (fname, content)
+    buf = io.BytesIO()
+    lines = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, e in enumerate(entries, start=1):
+            dt = datetime.fromtimestamp(e["ts"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            media_note = f" [fayl: {results[i][0]}]" if i in results else ""
+            lines.append(f"[{dt}] {e['from_label']} (id:{e['from_id']}): {e.get('text', '')}{media_note}")
+            if i in results:
+                fname, content = results[i]
+                zf.writestr(fname, content)
+        zf.writestr("_chat_log.txt", "\n".join(lines))
+    buf.seek(0)
+    return buf, len(entries)
+
+
+def _send_backup_zip(key, src, days, user_id):
+    buf, count = build_backup_zip(key, days)
+    if not buf:
+        send_message(user_id, "Bu davr uchun hech qanday zaxiralangan xabar topilmadi.")
+        return
+    safe_title = re.sub(r"[^\w\-]+", "_", src.get("title", "chat"))[:40]
+    fname = f"backup_{safe_title}_{days}kun.zip"
+    send_document_bytes(user_id, fname, buf.getvalue(), caption=f"🗄 {src.get('title')} — {count} ta xabar")
 
 
 # ---------- Majburiy / bonus kanallar ----------
@@ -2984,6 +3213,7 @@ def main_menu_keyboard(user_id):
         [{"text": "🏆 Reyting", "callback_data": "menu_leaderboard"}],
         [{"text": "🔑 Avto-javob (Business)", "callback_data": "menu_keywords"}],
         [{"text": "🕐 Bio soat (Business)", "callback_data": "menu_bioclock"}],
+        [{"text": "🗄 Backup", "callback_data": "menu_backup"}],
     ]
     if is_admin(user_id):
         rows.append([{"text": "👑 Superadmin panel" if user_id == SUPERADMIN_ID else "🛠 Admin panel",
@@ -3276,6 +3506,163 @@ def handle_callback_query(cq):
             f"(1 dan 10000 gacha, masalan: 50):",
             reply_markup=back_to_menu_keyboard(),
         )
+        return
+
+    # ---------- Backup ----------
+    if data == "menu_backup":
+        answer_callback_query(cq_id)
+        rows = []
+        for cid_str, g in STATE.get("groups", {}).items():
+            if get_chat_member_status(int(cid_str), user_id) in ("administrator", "creator"):
+                key = backup_source_key(cid_str)
+                mark = "✅ " if get_backup_source(key) else ""
+                rows.append([{"text": f"{mark}👥 {g.get('title', cid_str)}", "callback_data": f"backup_toggle:{key}"}])
+        for cid_str, c in STATE.get("channels", {}).items():
+            if get_chat_member_status(int(cid_str), user_id) in ("administrator", "creator"):
+                key = backup_source_key(cid_str)
+                mark = "✅ " if get_backup_source(key) else ""
+                rows.append([{"text": f"{mark}📢 {c.get('title', cid_str)}", "callback_data": f"backup_toggle:{key}"}])
+        biz_conn = get_business_connection_id(user_id)
+        if biz_conn:
+            auto = get_backup_business_auto(user_id)
+            mark = "✅ " if auto.get("enabled") else ""
+            rows.append([{"text": f"{mark}👤 Shaxsiy chatlar (Business)", "callback_data": "backup_toggle_business"}])
+        found_any = bool(rows)
+        if get_backup_sources_for_owner(user_id):
+            rows.append([{"text": "📤 ZIP olish (eksport)", "callback_data": "backup_export_menu"}])
+        rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
+        text = (
+            "🗄 <b>Backup</b>\n\n"
+            "Zaxiralamoqchi bo'lgan guruh/kanalni tanlang (bosilsa yoqiladi/o'chiriladi). "
+            "Faqat siz admin bo'lgan va bot ham admin bo'lgan joylar ko'rinadi.\n\n"
+            "⚠️ Bot eski xabarlarni ko'ra olmaydi — faqat yoqilgandan keyin kelgan "
+            "xabarlar zaxiralanadi."
+        )
+        if not found_any and not biz_conn:
+            text += "\n\nHozircha mos guruh/kanal topilmadi (bot admin bo'lgan joy yo'q)."
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("backup_toggle:"):
+        answer_callback_query(cq_id)
+        key = data.split(":", 1)[1]
+        if get_backup_source(key):
+            disable_backup_source(key)
+            safe_edit_or_send(chat_id, message_id, "❌ Backup o'chirildi.", reply_markup=back_to_menu_keyboard())
+            return
+        raw_chat_id = int(key)
+        if get_chat_member_status(raw_chat_id, user_id) not in ("administrator", "creator"):
+            answer_callback_query(cq_id, "Siz bu joyda admin emassiz.", show_alert=True)
+            return
+        if not bot_is_group_admin(raw_chat_id):
+            answer_callback_query(cq_id, "Bot bu joyda admin bo'lishi kerak (barcha xabarlarni ko'rish uchun).",
+                                   show_alert=True)
+            return
+        is_channel = key in STATE.get("channels", {})
+        chat_info = STATE.get("channels", {}).get(key) or STATE.get("groups", {}).get(key) or {}
+        enable_backup_source(key, user_id, "channel" if is_channel else "group", raw_chat_id,
+                              chat_info.get("title", key), username=chat_info.get("username"))
+        keyboard = {"inline_keyboard": [
+            [{"text": "📦 Shu chatga ZIP (menga)", "callback_data": f"backup_delivery:{key}:zip_self"}],
+            [{"text": "📤 Boshqa guruh/kanalga forward", "callback_data": f"backup_delivery:{key}:forward_group"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, "✅ Yoqildi. Endi qanday olmoqchisiz?", reply_markup=keyboard)
+        return
+
+    if data.startswith("backup_delivery:"):
+        answer_callback_query(cq_id)
+        key, mode = data.split(":", 1)[1].rsplit(":", 1)
+        if mode == "zip_self":
+            set_backup_delivery(key, "zip_self")
+            safe_edit_or_send(
+                chat_id, message_id,
+                "✅ Tayyor. Xabarlar yig'ib boriladi, \"📤 ZIP olish\" orqali istalgan payt yuklab olasiz.",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return
+        if mode == "forward_group":
+            set_pending_input(user_id, "backup_target_chat", {"key": key})
+            safe_edit_or_send(
+                chat_id, message_id,
+                "Bot admin qilib qo'yilgan guruh/kanalning username (@...) yoki ID sini yozing:",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return
+        return
+
+    if data == "backup_toggle_business":
+        answer_callback_query(cq_id)
+        if not get_business_connection_id(user_id):
+            answer_callback_query(cq_id, "Business ulanish faol emas.", show_alert=True)
+            return
+        auto = get_backup_business_auto(user_id)
+        if auto.get("enabled"):
+            set_backup_business_auto(user_id, False)
+            safe_edit_or_send(chat_id, message_id, "❌ Shaxsiy chat backup o'chirildi.",
+                               reply_markup=back_to_menu_keyboard())
+            return
+        keyboard = {"inline_keyboard": [
+            [{"text": "📦 Shu chatga ZIP (menga)", "callback_data": "backup_delivery_biz:zip_self"}],
+            [{"text": "📤 Boshqa guruh/kanalga forward", "callback_data": "backup_delivery_biz:forward_group"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, "Shaxsiy chatlar uchun qanday olmoqchisiz?", reply_markup=keyboard)
+        return
+
+    if data.startswith("backup_delivery_biz:"):
+        answer_callback_query(cq_id)
+        mode = data.split(":", 1)[1]
+        if mode == "zip_self":
+            set_backup_business_auto(user_id, True, delivery_mode="zip_self")
+            safe_edit_or_send(
+                chat_id, message_id,
+                "✅ Yoqildi. Yangi shaxsiy xabarlar (Business orqali) avtomatik zaxiralanadi.",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return
+        if mode == "forward_group":
+            set_pending_input(user_id, "backup_target_chat", {"key": "business"})
+            safe_edit_or_send(
+                chat_id, message_id,
+                "Bot admin qilib qo'yilgan guruh/kanalning username (@...) yoki ID sini yozing:",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return
+        return
+
+    if data == "backup_export_menu":
+        answer_callback_query(cq_id)
+        my_sources = get_backup_sources_for_owner(user_id)
+        if not my_sources:
+            safe_edit_or_send(chat_id, message_id, "Hali yoqilgan backup yo'q.", reply_markup=back_to_menu_keyboard())
+            return
+        icon = {"private": "👤", "channel": "📢"}
+        rows = [[{"text": f"{icon.get(s['type'], '👥')} {s['title']}",
+                  "callback_data": f"backup_export_pick:{s['key']}"}] for s in my_sources]
+        rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
+        safe_edit_or_send(chat_id, message_id, "Qaysi chat uchun ZIP olasiz?", reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("backup_export_pick:"):
+        answer_callback_query(cq_id)
+        key = data.split(":", 1)[1]
+        rows = [[{"text": label, "callback_data": f"backup_export_run:{key}:{code}"}]
+                for code, label, _days in BACKUP_RANGES]
+        rows.append([{"text": "⬅️ Orqaga", "callback_data": "backup_export_menu"}])
+        safe_edit_or_send(chat_id, message_id, "Qaysi davr uchun?", reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("backup_export_run:"):
+        answer_callback_query(cq_id, "Tayyorlanmoqda...")
+        key, code = data.split(":", 1)[1].rsplit(":", 1)
+        days = next((d for c, _l, d in BACKUP_RANGES if c == code), 7)
+        src = get_backup_source(key)
+        if not src or src.get("owner_id") != user_id:
+            safe_edit_or_send(chat_id, message_id, "Bu backup sizga tegishli emas.",
+                               reply_markup=back_to_menu_keyboard())
+            return
+        run_safe_thread(_send_backup_zip, key, src, days, user_id, chat_id=user_id)
+        safe_edit_or_send(chat_id, message_id, "📦 ZIP tayyorlanmoqda, tez orada yuboriladi...",
+                           reply_markup=back_to_menu_keyboard())
         return
 
     if data == "menu_bioclock":
@@ -4474,6 +4861,25 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         _run_publish_flow(user_id, data)
         return True
 
+    if action == "backup_target_chat":
+        clear_pending_input(user_id)
+        resolved = _resolve_chat(text.strip())
+        if not resolved:
+            send_message(chat_id, "Chat topilmadi. Username yoki ID to'g'ri ekanini tekshiring.")
+            return True
+        if not bot_is_group_admin(resolved["chat_id"]):
+            send_message(chat_id, "Bot o'sha joyda admin emas. Avval botni o'sha guruh/kanalga admin qiling.")
+            return True
+        target_key = pending["data"].get("key")
+        if target_key == "business":
+            set_backup_business_auto(user_id, True, delivery_mode="forward_group",
+                                      delivery_target_chat_id=resolved["chat_id"])
+            send_message(chat_id, f"✅ Yoqildi. Shaxsiy xabarlar \"{resolved['title']}\" ga forward qilinadi.")
+        else:
+            set_backup_delivery(target_key, "forward_group", resolved["chat_id"])
+            send_message(chat_id, f"✅ Yoqildi. Xabarlar \"{resolved['title']}\" ga forward qilinadi.")
+        return True
+
     if action == "getpack":
         clear_pending_input(user_id)
         if not enforce_force_join(chat_id, user_id):
@@ -5267,6 +5673,21 @@ def handle_business_message(msg, business_connection_id):
     is_owner = owner_id is not None and user_id == owner_id
     can_run_commands = is_owner or is_admin(user_id)
 
+    if owner_id:
+        backup_key = backup_source_key(chat_id, business_connection_id)
+        if not get_backup_source(backup_key):
+            auto = get_backup_business_auto(owner_id)
+            if auto.get("enabled"):
+                enable_backup_source(
+                    backup_key, owner_id, "private", chat_id,
+                    title=(requester_info if not is_owner else f"chat:{chat_id}"),
+                    business_connection_id=business_connection_id,
+                )
+                set_backup_delivery(backup_key, auto.get("delivery_mode", "zip_self"),
+                                     auto.get("delivery_target_chat_id"))
+        if get_backup_source(backup_key):
+            log_backup_message(backup_key, msg, business_connection_id=business_connection_id)
+
     if is_owner:
         # Egasi shu chatga o'zi yozdi (buyruq bo'lsa ham, oddiy javob bo'lsa ham) —
         # kutilayotgan kechiktirilgan avto-javob(lar) shundan keyin o'zini bekor qiladi.
@@ -5501,6 +5922,9 @@ def _webhook_impl():
     if channel_post:
         chat_id = channel_post["chat"]["id"]
         register_channel(channel_post["chat"])
+        backup_key = backup_source_key(chat_id)
+        if get_backup_source(backup_key):
+            log_backup_message(backup_key, channel_post)
         if bot_is_group_admin(chat_id):
             react_with_kind(chat_id, channel_post["message_id"], "channel")
         return {"ok": True}
@@ -5640,6 +6064,9 @@ def _webhook_impl():
 
     if is_group:
         register_group(msg["chat"])
+        backup_key = backup_source_key(chat_id)
+        if get_backup_source(backup_key):
+            log_backup_message(backup_key, msg)
         if is_admin(user_id):
             reaction_kind = "superadmin" if user_id == SUPERADMIN_ID else "admin"
             react_with_kind(chat_id, msg["message_id"], reaction_kind)
