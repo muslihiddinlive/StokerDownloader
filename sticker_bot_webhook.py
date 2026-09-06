@@ -3328,8 +3328,10 @@ def _render_limits_panel_text_and_keyboard():
         f"Kunlikka o'tish chegarasi: {cfg['weekly_cap']}\n"
         f"Bepul kalit so'z limiti: {cfg.get('keyword_free_limit', 2)}\n\n"
         f"⭐ Premium narxi: {cfg['premium_price_stars']} Stars ({months} oy)\n"
-        f"➕ Stars→limit nisbati: 1 Star = {cfg['stars_per_limit']} limit\n"
-        f"📤 Publish narxi: {cfg['publish_price_stars']} Stars / 1 marta\n"
+        f"➕ Stars→limit nisbati: 1 Star = {cfg['stars_per_limit']} limit "
+        f"(faqat \"limit sotib olish\"ga tegishli, Stars hamyoniga emas)\n"
+        f"📤 Publish narxi: {cfg['publish_price_stars']} Stars / 1 marta "
+        f"(Stars hamyonidan yechiladi)\n"
     )
     keyboard = {"inline_keyboard": [
         [
@@ -3442,7 +3444,7 @@ def handle_callback_query(cq):
             until = datetime.fromtimestamp(record["premium_until"], tz=timezone.utc).strftime("%Y-%m-%d")
             keyboard = {"inline_keyboard": [
                 [{"text": "➕ Istagan miqdorda limit sotib olish", "callback_data": "buy_limit_custom"}],
-                [{"text": "💰 Stars hamyonini to'ldirish", "callback_data": "buy_wallet_custom"}],
+                [{"text": "💰 Stars hamyonini to'ldirish (publish uchun)", "callback_data": "buy_wallet_custom"}],
                 [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
             ]}
             safe_edit_or_send(chat_id, message_id,
@@ -3453,13 +3455,14 @@ def handle_callback_query(cq):
                     f"⭐ <b>Premium</b> — kunlik/haftalik limitlarsiz, cheksiz pack yuklab olasiz "
                     f"({months} oy muddatga).\n\n"
                     f"➕ <b>Qo'shimcha limit</b> — xohlagan miqdorda Stars to'lab, {ratio} Star = {ratio} limit "
-                    f"nisbatida limit sotib olasiz.\n\n"
-                    f"💰 <b>Stars hamyoni</b> — pul to'ldirib, publish va boshqa xizmatlar uchun ishlatasiz."
+                    f"nisbatida <u>yuklab olish limitingizni oshirasiz</u>.\n\n"
+                    f"💰 <b>Stars hamyoni</b> — bu limitga TA'SIR QILMAYDI. Bu — faqat "
+                    f"<u>publish (kanalga post) xizmati</u> uchun alohida to'lov balansi."
                     f"{wallet_line}")
             keyboard = {"inline_keyboard": [
                 [{"text": f"⭐ {price} Stars — Premium ({months} oy, cheksiz)", "callback_data": "buy_premium"}],
-                [{"text": "➕ Istagan miqdorda limit sotib olish", "callback_data": "buy_limit_custom"}],
-                [{"text": "💰 Stars hamyonini to'ldirish", "callback_data": "buy_wallet_custom"}],
+                [{"text": "➕ Limit sotib olish (yuklash chegarasini oshiradi)", "callback_data": "buy_limit_custom"}],
+                [{"text": "💰 Stars hamyonini to'ldirish (publish uchun)", "callback_data": "buy_wallet_custom"}],
                 [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
             ]}
             safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
@@ -3470,7 +3473,10 @@ def handle_callback_query(cq):
         set_pending_input(user_id, "buy_wallet_amount", {})
         safe_edit_or_send(
             chat_id, message_id,
-            "Stars hamyoningizga nechta Star to'ldirmoqchisiz? (1 dan 10000 gacha, masalan: 10):",
+            "💰 Bu — <b>Stars hamyoni</b>, u yuklab olish limitingizga TA'SIR QILMAYDI, "
+            "faqat publish (kanalga post) xizmati uchun ishlatiladi.\n\n"
+            "Nechta Star to'ldirmoqchisiz? (1 dan 10000 gacha, masalan: 10):",
+            parse_mode_html=True,
             reply_markup=back_to_menu_keyboard(),
         )
         return
@@ -3502,8 +3508,10 @@ def handle_callback_query(cq):
         set_pending_input(user_id, "buy_limit_amount", {})
         safe_edit_or_send(
             chat_id, message_id,
+            "📊 Bu — <b>yuklab olish limitingizni</b> oshirish (hamyon emas).\n\n"
             f"Nechta Star to'lamoqchisiz? Har bir Star uchun {ratio} ta limit qo'shiladi "
             f"(1 dan 10000 gacha, masalan: 50):",
+            parse_mode_html=True,
             reply_markup=back_to_menu_keyboard(),
         )
         return
