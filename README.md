@@ -6,6 +6,14 @@
 
 ---
 
+## 🔴 Live Demo
+
+This repository is the **exact source code running in production** behind **[@ThehackerRobot](https://t.me/ThehackerRobot)** on Telegram.
+
+It's not a sample, mock, or stripped-down version — it's the real, deployed bot. Open Telegram, start a chat with [@ThehackerRobot](https://t.me/ThehackerRobot), and try any feature listed below to see this code running live.
+
+---
+
 ## ✨ Features
 
 - 📦 **Pack downloader** — Forward any sticker/emoji or send `/getpack <pack_name>` to get a full ZIP (`.tgs` / `.webp` / `.webm`)
