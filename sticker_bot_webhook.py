@@ -4197,6 +4197,22 @@ def handle_callback_query(cq):
                            "✅ Reak mode (🎲 Random) yoqildi: endi har bir yangi xabarga tasodifiy emoji qo'yiladi.")
         return
 
+    if data == "reak_pick_random_positive":
+        answer_callback_query(cq_id)
+        pending = get_pending_input(user_id) or {}
+        if pending.get("action") != "reak_pick_emoji":
+            answer_callback_query(cq_id, "Bu tanlov muddati o'tgan.", show_alert=True)
+            return
+        pdata = pending.get("data") or {}
+        target_chat_id = pdata.get("chat_id")
+        clear_pending_input(user_id)
+        if not target_chat_id:
+            return
+        set_reak_mode(target_chat_id, None, set_by=user_id, random_positive=True)
+        safe_edit_or_send(chat_id, message_id,
+                           "✅ Reak mode (🌈 Random ijobiy) yoqildi: endi har bir yangi xabarga tasodifiy ijobiy emoji qo'yiladi.")
+        return
+
     if data.startswith("reak_pick:"):
         answer_callback_query(cq_id)
         emoji = data.split(":", 1)[1]
@@ -6059,10 +6075,11 @@ def get_reak_mode(chat_id):
         return STATE.get("reak_modes", {}).get(str(chat_id))
 
 
-def set_reak_mode(chat_id, emoji, set_by, random_mode=False):
+def set_reak_mode(chat_id, emoji, set_by, random_mode=False, random_positive=False):
     with _state_lock:
         STATE.setdefault("reak_modes", {})[str(chat_id)] = {
             "emoji": emoji, "set_by": set_by, "random": random_mode,
+            "random_positive": random_positive,
             "set_at": datetime.now(timezone.utc).isoformat(),
         }
         save_state_locked()
@@ -6085,8 +6102,17 @@ REAK_EMOJI_CHOICES = [
     "🤷‍♀", "😡",
 ]
 
+# Faqat chin ma'noda ijobiy/quvnoq/muhabbat/tabrik ma'nosidagi emojilar —
+# "Random ijobiy" rejimi shu ro'yxatdan tanlaydi (o'rta barmoq, hotdog va
+# salbiy/norasmiy emojilar bu yerda yo'q).
+REAK_EMOJI_POSITIVE_CHOICES = [
+    "👍", "❤️", "🔥", "🥰", "👏", "😁", "🎉", "🤩", "🙏", "😍",
+    "💯", "🤣", "⚡", "🏆", "😎", "🌟", "🤗", "🫡", "💘", "😘",
+    "🕊", "🤝", "✍", "😇", "🆒",
+]
 
-def reak_emoji_pick_keyboard(random_selected=False):
+
+def reak_emoji_pick_keyboard(random_selected=False, random_positive_selected=False):
     rows = []
     row = []
     for i, e in enumerate(REAK_EMOJI_CHOICES, 1):
@@ -6098,6 +6124,8 @@ def reak_emoji_pick_keyboard(random_selected=False):
         rows.append(row)
     random_label = "🎲 Random (hammaga har xil) ✅" if random_selected else "🎲 Random (hammaga har xil)"
     rows.append([{"text": random_label, "callback_data": "reak_pick_random"}])
+    random_pos_label = "🌈 Random ijobiy ✅" if random_positive_selected else "🌈 Random ijobiy"
+    rows.append([{"text": random_pos_label, "callback_data": "reak_pick_random_positive"}])
     return {"inline_keyboard": rows}
 
 
@@ -6538,7 +6566,9 @@ def _webhook_impl():
             return {"ok": True}
         mode = get_reak_mode(chat_id)
         if mode and not is_admin(user_id):
-            if mode.get("random"):
+            if mode.get("random_positive"):
+                react(chat_id, msg["message_id"], emoji=random.choice(REAK_EMOJI_POSITIVE_CHOICES))
+            elif mode.get("random"):
                 react(chat_id, msg["message_id"], emoji=random.choice(REAK_EMOJI_CHOICES))
             elif mode.get("emoji"):
                 react(chat_id, msg["message_id"], emoji=mode["emoji"])
