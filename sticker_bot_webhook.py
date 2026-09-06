@@ -669,6 +669,73 @@ def bot_is_group_admin(chat_id):
     return status in ("administrator", "creator")
 
 
+# ---------- Guruh moderatsiyasi (.del/.ban/.mute/.kick) uchun huquq tekshiruvi ----------
+
+def is_group_owner(chat_id, user_id):
+    return get_chat_member_status(chat_id, user_id) == "creator"
+
+
+def is_group_admin_or_owner(chat_id, user_id):
+    return get_chat_member_status(chat_id, user_id) in ("administrator", "creator")
+
+
+def can_moderate_group(chat_id, user_id):
+    """.del/.ban/.mute/.kick buyruqlarini kim ishlata oladi:
+    bot superadmini, bot admini, guruh admini yoki guruh egasi."""
+    if is_admin(user_id):
+        return True
+    return is_group_admin_or_owner(chat_id, user_id)
+
+
+_DURATION_UNITS = ("soniya", "daqiqa", "soat", "kun", "oy")
+_DURATION_SECONDS = (1, 60, 3600, 86400, 2592000)  # oy ~ 30 kun
+
+
+def parse_mute_duration(parts):
+    """[soniya, daqiqa, soat, kun, oy] tartibidagi 5 ta sonni umumiy soniyaga aylantiradi.
+    Noto'g'ri format bo'lsa None qaytaradi."""
+    if len(parts) != 5:
+        return None
+    total = 0
+    for value, mult in zip(parts, _DURATION_SECONDS):
+        try:
+            n = int(value)
+        except ValueError:
+            return None
+        if n < 0:
+            return None
+        total += n * mult
+    return total if total > 0 else None
+
+
+def resolve_target_user(chat_id, reply, args_text):
+    """Moderatsiya buyrug'i uchun nishon userni aniqlaydi:
+    1) reply qilingan xabar bo'lsa — o'sha xabar egasi
+    2) bo'lmasa, args_text ichidan @username yoki raqamli ID qidiriladi (faqat botga
+       ma'lum bo'lgan userlar orasidan — Bot API begona username'ni ID'ga aylantira olmaydi)
+    Qaytaradi: (user_id, label) yoki (None, xato_matni)
+    """
+    if reply and reply.get("from"):
+        return reply["from"]["id"], requester_label(reply["from"])
+
+    token = (args_text or "").strip().split()[0] if (args_text or "").strip() else ""
+    if not token:
+        return None, "Xabarga reply qiling yoki username/ID ko'rsating."
+
+    if token.lstrip("-").isdigit():
+        target_id = int(token)
+        return target_id, user_label(target_id)
+
+    uname = token.lstrip("@").lower()
+    with _state_lock:
+        known_ids = list(STATE.get("known_users", []))
+    for uid in known_ids:
+        rec = get_user_record(uid)
+        if (rec.get("username") or "").lower() == uname:
+            return uid, user_label(uid)
+    return None, f"@{uname} — botga tanish emas (u bot bilan hech gaplashmagan bo'lishi mumkin)."
+
+
 # ---------- DB (Telegram guruh + pinned xabar orqali) ----------
 
 def default_state():
@@ -679,6 +746,8 @@ def default_state():
         # Bot qo'shilgan guruh/kanallar kuzatuvi:
         "groups": {},    # {chat_id_str: {"title","type","added_at"}}
         "channels": {},  # {chat_id_str: {"title","username","added_at"}}
+        "reak_modes": {},  # {chat_id_str: {"emoji","set_by","paid","set_at"}} — /reak mode: on holati
+        "reak_pending": {},  # {str(user_id): {"chat_id","group_message_id","free"}} — invoice/emoji tanlash oralig'i
         "config": {
             "base_weekly": 7,
             "weekly_cap": 7,
@@ -741,7 +810,7 @@ def _merge_with_defaults(loaded):
         d = default_state()[key]
         d.update(merged.get(key, {}))
         merged[key] = d
-    for key in ("groups", "channels"):
+    for key in ("groups", "channels", "reak_modes", "reak_pending"):
         merged.setdefault(key, {})
     merged.setdefault("processed_payments", [])
     merged.setdefault("userbot_sessions", {})
@@ -4107,6 +4176,22 @@ def handle_callback_query(cq):
             handle_gif_id_request(chat_id, pending, user_id)
         return
 
+    if data.startswith("reak_pick:"):
+        answer_callback_query(cq_id)
+        emoji = data.split(":", 1)[1]
+        pending = get_pending_input(user_id) or {}
+        if pending.get("action") != "reak_pick_emoji":
+            answer_callback_query(cq_id, "Bu tanlov muddati o'tgan.", show_alert=True)
+            return
+        pdata = pending.get("data") or {}
+        target_chat_id = pdata.get("chat_id")
+        clear_pending_input(user_id)
+        if not target_chat_id:
+            return
+        set_reak_mode(target_chat_id, emoji, set_by=user_id)
+        safe_edit_or_send(chat_id, message_id, f"✅ Reak mode yoqildi: {emoji} endi har bir yangi xabarga qo'yiladi.")
+        return
+
     # ---- Quyidagilar faqat adminlar uchun ----
     if not is_admin(user_id):
         answer_callback_query(cq_id)
@@ -5909,9 +5994,132 @@ def handle_business_message(msg, business_connection_id):
 
 # ---------- Guruh ".zip" / ".zipstiker" (moderatsion, admin-only) ----------
 
+def can_manage_reak_mode(chat_id, user_id):
+    """/reak mode: on ni kim ishlata oladi: bot superadmini/admini (bepul),
+    guruh egasi yoki guruh admini (to'lov bilan)."""
+    if is_admin(user_id):
+        return True
+    return is_group_admin_or_owner(chat_id, user_id)
+
+
+def can_disable_reak_mode(chat_id, user_id):
+    """/reak mode: off ni faqat bot superadmini/admini yoki guruh egasi qila oladi."""
+    if is_admin(user_id):
+        return True
+    return is_group_owner(chat_id, user_id)
+
+
+def get_reak_mode(chat_id):
+    with _state_lock:
+        return STATE.get("reak_modes", {}).get(str(chat_id))
+
+
+def set_reak_mode(chat_id, emoji, set_by):
+    with _state_lock:
+        STATE.setdefault("reak_modes", {})[str(chat_id)] = {
+            "emoji": emoji, "set_by": set_by,
+            "set_at": datetime.now(timezone.utc).isoformat(),
+        }
+        save_state_locked()
+
+
+def clear_reak_mode(chat_id):
+    with _state_lock:
+        STATE.setdefault("reak_modes", {}).pop(str(chat_id), None)
+        save_state_locked()
+
+
+REAK_EMOJI_CHOICES = ["👍", "❤️", "🔥", "🥰", "👏", "😁", "🤔", "🎉", "🤩", "🙏", "😍", "💯"]
+
+
+def reak_emoji_pick_keyboard():
+    rows = []
+    row = []
+    for i, e in enumerate(REAK_EMOJI_CHOICES, 1):
+        row.append({"text": e, "callback_data": f"reak_pick:{e}"})
+        if i % 4 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return {"inline_keyboard": rows}
+
+
 def handle_group_dot_commands(msg, chat_id, user_id, text):
     reply = msg.get("reply_to_message")
     stripped = text.strip()
+
+    if stripped == ".del":
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        if not reply:
+            send_message(chat_id, "O'chirmoqchi bo'lgan xabaringizga reply qilib .del yozing.")
+            return True
+        delete_message(chat_id, reply["message_id"])
+        delete_message(chat_id, msg["message_id"])
+        return True
+
+    if stripped == ".ban" or stripped.startswith(".ban "):
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        args_text = stripped[len(".ban"):].strip()
+        target_id, label_or_err = resolve_target_user(chat_id, reply, args_text)
+        if target_id is None:
+            send_message(chat_id, label_or_err)
+            return True
+        result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
+        if result and result.get("ok"):
+            send_message(chat_id, f"🚫 {label_or_err} guruhdan ban qilindi.")
+        else:
+            send_message(chat_id, "Ban qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+        return True
+
+    if stripped == ".kick" or stripped.startswith(".kick "):
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        args_text = stripped[len(".kick"):].strip()
+        target_id, label_or_err = resolve_target_user(chat_id, reply, args_text)
+        if target_id is None:
+            send_message(chat_id, label_or_err)
+            return True
+        ban_result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
+        if ban_result and ban_result.get("ok"):
+            tg_call("unbanChatMember", chat_id=chat_id, user_id=target_id, only_if_banned=True)
+            send_message(chat_id, f"👢 {label_or_err} guruhdan chiqarildi (qaytib kira oladi).")
+        else:
+            send_message(chat_id, "Chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+        return True
+
+    if stripped.startswith(".mute"):
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        rest = stripped[len(".mute"):].strip()
+        parts = rest.split()
+        # Oxirgi 5 ta token vaqt sifatida ishlatiladi (qolgani username/ID bo'lishi mumkin)
+        duration_parts = parts[-5:] if len(parts) >= 5 else parts
+        args_text = " ".join(parts[:-5]) if len(parts) > 5 else ""
+        seconds = parse_mute_duration(duration_parts)
+        if seconds is None:
+            send_message(chat_id, "Format: .mute soniya daqiqa soat kun oy (masalan: .mute 1 21 2 2 3)")
+            return True
+        target_id, label_or_err = resolve_target_user(chat_id, reply, args_text)
+        if target_id is None:
+            send_message(chat_id, label_or_err)
+            return True
+        until_ts = int(time.time()) + seconds
+        result = tg_call(
+            "restrictChatMember", chat_id=chat_id, user_id=target_id, until_date=until_ts,
+            permissions={"can_send_messages": False, "can_send_audios": False, "can_send_documents": False,
+                         "can_send_photos": False, "can_send_videos": False, "can_send_video_notes": False,
+                         "can_send_voice_notes": False, "can_send_polls": False, "can_send_other_messages": False,
+                         "can_add_web_page_previews": False},
+        )
+        if result and result.get("ok"):
+            d, h, mi, s_, mo = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60, seconds % 60, 0
+            send_message(chat_id, f"🔇 {label_or_err} {seconds} soniyaga (~{d}k {h}s {mi}d {s_}soniya) mute qilindi.")
+        else:
+            send_message(chat_id, "Mute qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+        return True
 
     if stripped == ".zipstiker":
         if not is_admin(user_id):
@@ -6080,7 +6288,7 @@ def _webhook_impl():
     if pre_checkout_query:
         payer_id = pre_checkout_query["from"]["id"]
         payload = pre_checkout_query.get("invoice_payload", "")
-        if not (payload.startswith("premium:") or payload.startswith("buy_limit:") or payload.startswith("topup_wallet:")):
+        if not (payload.startswith("premium:") or payload.startswith("buy_limit:") or payload.startswith("topup_wallet:") or payload.startswith("reak_mode:")):
             tg_call("answerPreCheckoutQuery", pre_checkout_query_id=pre_checkout_query["id"],
                      ok=False, error_message="Noma'lum buyurtma. Qaytadan urinib ko'ring.")
             return {"ok": True}
@@ -6174,6 +6382,26 @@ def _webhook_impl():
                 )
             return {"ok": True}
 
+        if payload.startswith("reak_mode:"):
+            try:
+                _, payer_str, group_chat_str = payload.split(":", 2)
+                group_chat_id = int(group_chat_str)
+            except (ValueError, IndexError):
+                log.warning("reak_mode payload formatida xato: %r", payload)
+                notify_admin(f"⚠️ reak_mode payload formatida xato: {payload!r}, payer id:{payer_id}.")
+                return {"ok": True}
+            # Guruh admini/egasi bo'lib qolganmi (to'lov paytida huquqi o'zgargan bo'lishi mumkin) —
+            # baribir tanlash imkoniyatini beramiz, lekin "amalga oshirilmaydi" belgisini
+            # payer huquqiga qarab hozir belgilab qo'yamiz.
+            effective = is_group_admin_or_owner(group_chat_id, payer_id) or is_admin(payer_id)
+            if effective:
+                set_pending_input(payer_id, "reak_pick_emoji", {"chat_id": group_chat_id, "free": False})
+                send_message(group_chat_id, f"✅ To'lov qabul qilindi ({total_amount} Stars). Qaysi reaksiya bo'lsin?",
+                             reply_markup=reak_emoji_pick_keyboard())
+            else:
+                send_message(group_chat_id, "🙏 Rahmat jigar! To'lovingiz qabul qilindi.")
+            return {"ok": True}
+
         # Payload tekshiriladi — kelajakda boshqa turdagi to'lov (invoice)
         # qo'shilsa, faqat "premium:" bilan boshlanadigan to'lovlar
         # uchun Premium berilishi kerak, boshqasiga emas.
@@ -6217,6 +6445,35 @@ def _webhook_impl():
         if text.strip().startswith("."):
             if handle_group_dot_commands(msg, chat_id, user_id, text):
                 return {"ok": True}
+        reak_cmd = text.strip().lower()
+        if reak_cmd in ("/reak mode: on", "/reak mode:on", "/reak mode : on"):
+            if not can_manage_reak_mode(chat_id, user_id):
+                send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                return {"ok": True}
+            if is_admin(user_id):
+                set_pending_input(user_id, "reak_pick_emoji", {"chat_id": chat_id, "free": True})
+                send_message(chat_id, "✅ To'lovsiz (bot admini). Qaysi reaksiya bo'lsin?",
+                             reply_markup=reak_emoji_pick_keyboard())
+                return {"ok": True}
+            result = tg_call(
+                "sendInvoice", chat_id=chat_id, title="Reak mode — avtomatik reaksiya",
+                description="Guruhdagi barcha xabarlarga avtomatik reaksiya qo'yish xizmati.",
+                payload=f"reak_mode:{user_id}:{chat_id}", provider_token="", currency="XTR",
+                prices=[{"label": "Reak mode (5 Stars)", "amount": 5}],
+            )
+            if not result or not result.get("ok"):
+                send_message(chat_id, "⚠️ To'lov havolasini yaratishda xato yuz berdi.")
+            return {"ok": True}
+        if reak_cmd in ("/reak mode: off", "/reak mode:off", "/reak mode : off"):
+            if not can_disable_reak_mode(chat_id, user_id):
+                send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                return {"ok": True}
+            clear_reak_mode(chat_id)
+            send_message(chat_id, "🛑 Reak mode o'chirildi.")
+            return {"ok": True}
+        mode = get_reak_mode(chat_id)
+        if mode and mode.get("emoji") and not is_admin(user_id):
+            react(chat_id, msg["message_id"], emoji=mode["emoji"])
         reply = msg.get("reply_to_message")
         if reply and reply.get("from", {}).get("id") and is_admin(reply["from"]["id"]) and not is_admin(user_id):
             reply_text, reply_entities = find_keyword_response(reply["from"]["id"], text)
