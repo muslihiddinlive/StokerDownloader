@@ -715,6 +715,8 @@ def default_user_record():
         "history": [],
         "first_seen": None,
         "stars_wallet": 0,  # foydalanuvchining bot ichidagi Stars hamyoni (publish va h.k. uchun)
+        "last_message_id": None,  # "User qidirish" panelida forward qilish uchun
+        "last_chat_id": None,
     }
 
 
@@ -1002,47 +1004,6 @@ def clear_text_decoration(key):
         return removed
 
 
-
-
-_POST_BRACKET_RE = __import__("re").compile(r"\[(\d{5,})\]")
-_POST_PLACEHOLDER = "\U0001F31F"
-
-
-def build_post_entities_from_brackets(template):
-    result_text = ""
-    entities = []
-    last_end = 0
-    utf16_offset = 0
-    for m in _POST_BRACKET_RE.finditer(template):
-        prefix = template[last_end:m.start()]
-        result_text += prefix
-        utf16_offset += utf16_len(prefix)
-        emoji_id = m.group(1)
-        result_text += _POST_PLACEHOLDER
-        length = utf16_len(_POST_PLACEHOLDER)
-        entities.append({
-            "type": "custom_emoji", "offset": utf16_offset,
-            "length": length, "custom_emoji_id": emoji_id,
-        })
-        utf16_offset += length
-        last_end = m.end()
-    result_text += template[last_end:]
-    return result_text, entities
-
-
-def post_pick_keyboard(items, page, page_size=8):
-    start = page * page_size
-    chunk = items[start:start + page_size]
-    rows = [[{"text": label, "callback_data": f"post_pick:{key}"}] for key, label in chunk]
-    nav = []
-    if page > 0:
-        nav.append({"text": "\u2b05\ufe0f", "callback_data": f"panel_post_channel:{page - 1}"})
-    if start + page_size < len(items):
-        nav.append({"text": "\u27a1\ufe0f", "callback_data": f"panel_post_channel:{page + 1}"})
-    if nav:
-        rows.append(nav)
-    rows.append([{"text": "\u2b05\ufe0f Panel", "callback_data": "menu_admin_panel"}])
-    return {"inline_keyboard": rows}
 
 
 def decorate_text(key, text):
@@ -1784,7 +1745,7 @@ def register_request(user_id, kind=None, detail=None):
         save_state_locked()
 
 
-def register_known_user(user_id, from_user=None):
+def register_known_user(user_id, from_user=None, message_id=None, chat_id=None):
     with _state_lock:
         if user_id not in STATE["known_users"]:
             STATE["known_users"].append(user_id)
@@ -1795,6 +1756,9 @@ def register_known_user(user_id, from_user=None):
             record["username"] = from_user["username"]
         if from_user and from_user.get("first_name"):
             record["first_name"] = from_user["first_name"]
+        if message_id is not None:
+            record["last_message_id"] = message_id
+            record["last_chat_id"] = chat_id
         save_state_locked()
 
 
@@ -1819,6 +1783,73 @@ def user_label(uid):
     if rec.get("first_name"):
         return rec["first_name"]
     return f"id:{uid}"
+
+
+# ---------- "User qidirish" paneli (ID orqali va harflab) ----------
+
+def find_user_by_id(target_id):
+    """Berilgan ID bo'yicha user recordini qaytaradi (mavjud bo'lsa), aks holda None."""
+    with _state_lock:
+        known = target_id in STATE.get("known_users", [])
+    if not known:
+        return None
+    return get_user_record(target_id)
+
+
+def search_users_by_prefix(query, limit=30):
+    """username yoki first_name ichida (case-insensitive) berilgan qatorni o'z ichiga
+    olgan userlarni qaytaradi: [(user_id, label), ...]. Faqat known_users orasidan qidiradi."""
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    results = []
+    with _state_lock:
+        known_ids = list(STATE.get("known_users", []))
+    for uid in known_ids:
+        rec = get_user_record(uid)
+        uname = (rec.get("username") or "").lower()
+        fname = (rec.get("first_name") or "").lower()
+        if q in uname or q in fname:
+            results.append((uid, user_label(uid)))
+        if len(results) >= limit:
+            break
+    return results
+
+
+def user_search_letters_keyboard(collected, results, page=0, page_size=6):
+    """A-Z harflar klaviaturasi + hozircha yig'ilgan so'z + topilgan userlar ro'yxati."""
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    letter_rows = []
+    row = []
+    for i, ch in enumerate(letters, 1):
+        row.append({"text": ch, "callback_data": f"usearch_letter:{ch}"})
+        if i % 7 == 0:
+            letter_rows.append(row)
+            row = []
+    if row:
+        letter_rows.append(row)
+
+    control_row = [{"text": "⌫ O'chirish", "callback_data": "usearch_backspace"}]
+    if collected:
+        control_row.append({"text": "♻️ Tozalash", "callback_data": "usearch_clear"})
+    letter_rows.append(control_row)
+
+    result_rows = []
+    start = page * page_size
+    chunk = results[start:start + page_size]
+    for uid, label in chunk:
+        result_rows.append([{"text": f"👤 {label}", "callback_data": f"user_detail:{uid}"}])
+    nav = []
+    if page > 0:
+        nav.append({"text": "⬅️", "callback_data": f"usearch_page:{page - 1}"})
+    if start + page_size < len(results):
+        nav.append({"text": "➡️", "callback_data": f"usearch_page:{page + 1}"})
+    if nav:
+        result_rows.append(nav)
+
+    letter_rows.extend(result_rows)
+    letter_rows.append([{"text": "⬅️ User qidirish", "callback_data": "panel_user_search"}])
+    return {"inline_keyboard": letter_rows}
 
 
 def register_referral(new_user_id, referrer_id):
@@ -3258,6 +3289,7 @@ def admin_panel_keyboard(user_id):
     is_super = user_id == SUPERADMIN_ID
     rows = [
         [{"text": "👥 Foydalanuvchilar", "callback_data": "panel_users:0"}],
+        [{"text": "🔎 User qidirish", "callback_data": "panel_user_search"}],
         [
             {"text": "👨‍👩‍👧 Guruhlar", "callback_data": "panel_groups:0"},
             {"text": "📢 Kanallar", "callback_data": "panel_channels:0"},
@@ -3282,7 +3314,6 @@ def admin_panel_keyboard(user_id):
             {"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"},
         ])
         rows.append([{"text": "✨ Bot imzosi (premium emoji)", "callback_data": "panel_signature"}])
-        rows.append([{"text": "📤 Kanalga post (emoji bilan)", "callback_data": "panel_post_channel:0"}])
         rows.append([{"text": "⭐ Stars balansi / Gift", "callback_data": "panel_stars"}])
         rows.append([
             {"text": "🏆 Referal reyting", "callback_data": "panel_leaderboard"},
@@ -4099,6 +4130,91 @@ def handle_callback_query(cq):
                            reply_markup=_paginate_keyboard(items, "user_detail", page))
         return
 
+    if data == "panel_user_search":
+        answer_callback_query(cq_id)
+        keyboard = {"inline_keyboard": [
+            [{"text": "🆔 ID orqali", "callback_data": "usearch_by_id"}],
+            [{"text": "🔤 Harflab", "callback_data": "usearch_letters:"}],
+            [{"text": "⬅️ Panel", "callback_data": "menu_admin_panel"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, "🔎 User qidirish — usulni tanlang:", reply_markup=keyboard)
+        return
+
+    if data == "usearch_by_id":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "usearch_id_input", {})
+        safe_edit_or_send(chat_id, message_id, "Foydalanuvchi ID'sini yuboring:",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
+    if data.startswith("usearch_letters:"):
+        answer_callback_query(cq_id)
+        collected = data.split(":", 1)[1]
+        results = search_users_by_prefix(collected) if collected else []
+        set_pending_input(user_id, "usearch_letters_state", {"collected": collected})
+        title = f"🔤 Harflab qidiruv\n\nYig'ilgan: <code>{collected or '—'}</code>\nTopilgan: {len(results)} ta"
+        safe_edit_or_send(chat_id, message_id, title, parse_mode_html=True,
+                           reply_markup=user_search_letters_keyboard(collected, results))
+        return
+
+    if data.startswith("usearch_letter:"):
+        answer_callback_query(cq_id)
+        letter = data.split(":", 1)[1]
+        pending = get_pending_input(user_id) or {}
+        collected = (pending.get("data") or {}).get("collected", "") if pending.get("action") == "usearch_letters_state" else ""
+        collected += letter
+        results = search_users_by_prefix(collected)
+        set_pending_input(user_id, "usearch_letters_state", {"collected": collected})
+        title = f"🔤 Harflab qidiruv\n\nYig'ilgan: <code>{collected}</code>\nTopilgan: {len(results)} ta"
+        safe_edit_or_send(chat_id, message_id, title, parse_mode_html=True,
+                           reply_markup=user_search_letters_keyboard(collected, results))
+        return
+
+    if data == "usearch_backspace":
+        answer_callback_query(cq_id)
+        pending = get_pending_input(user_id) or {}
+        collected = (pending.get("data") or {}).get("collected", "") if pending.get("action") == "usearch_letters_state" else ""
+        collected = collected[:-1]
+        results = search_users_by_prefix(collected) if collected else []
+        set_pending_input(user_id, "usearch_letters_state", {"collected": collected})
+        title = f"🔤 Harflab qidiruv\n\nYig'ilgan: <code>{collected or '—'}</code>\nTopilgan: {len(results)} ta"
+        safe_edit_or_send(chat_id, message_id, title, parse_mode_html=True,
+                           reply_markup=user_search_letters_keyboard(collected, results))
+        return
+
+    if data == "usearch_clear":
+        answer_callback_query(cq_id)
+        set_pending_input(user_id, "usearch_letters_state", {"collected": ""})
+        title = "🔤 Harflab qidiruv\n\nYig'ilgan: <code>—</code>\nTopilgan: 0 ta"
+        safe_edit_or_send(chat_id, message_id, title, parse_mode_html=True,
+                           reply_markup=user_search_letters_keyboard("", []))
+        return
+
+    if data.startswith("usearch_page:"):
+        answer_callback_query(cq_id)
+        page = int(data.split(":", 1)[1])
+        pending = get_pending_input(user_id) or {}
+        collected = (pending.get("data") or {}).get("collected", "") if pending.get("action") == "usearch_letters_state" else ""
+        results = search_users_by_prefix(collected) if collected else []
+        title = f"🔤 Harflab qidiruv\n\nYig'ilgan: <code>{collected or '—'}</code>\nTopilgan: {len(results)} ta"
+        safe_edit_or_send(chat_id, message_id, title, parse_mode_html=True,
+                           reply_markup=user_search_letters_keyboard(collected, results, page=page))
+        return
+
+    if data.startswith("usearch_forward:"):
+        answer_callback_query(cq_id)
+        target_id = int(data.split(":", 1)[1])
+        rec = get_user_record(target_id)
+        src_chat = rec.get("last_chat_id")
+        src_msg = rec.get("last_message_id")
+        if not src_chat or not src_msg:
+            answer_callback_query(cq_id, "Bu userdan hali xabar yo'q, forward qilib bo'lmaydi.", show_alert=True)
+            return
+        result = tg_call("forwardMessage", chat_id=chat_id, from_chat_id=src_chat, message_id=src_msg)
+        if not (result and result.get("ok")):
+            send_message(chat_id, "Forward qilishda xato yuz berdi (xabar o'chirilgan bo'lishi mumkin).")
+        return
+
     if data.startswith("user_detail:"):
         answer_callback_query(cq_id)
         target_id = int(data.split(":", 1)[1])
@@ -4132,6 +4248,8 @@ def handle_callback_query(cq):
                 {"text": f"📦 Pack ({counts.get('pack', 0)})", "callback_data": f"user_history:{target_id}:pack"},
             ],
         ]
+        if not rec.get("username") and rec.get("last_message_id"):
+            rows.append([{"text": "↪️ So'nggi xabarini forward qilish", "callback_data": f"usearch_forward:{target_id}"}])
         if user_id == SUPERADMIN_ID:
             rows.append([
                 {"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"},
@@ -4211,33 +4329,6 @@ def handle_callback_query(cq):
         items = [(cid, info.get("title", cid)) for cid, info in channels.items()]
         safe_edit_or_send(chat_id, message_id, f"📢 Kanallar ({len(items)}):",
                            reply_markup=_paginate_keyboard(items, "channel_detail", page))
-        return
-
-    if data.startswith("panel_post_channel:"):
-        answer_callback_query(cq_id)
-        page = int(data.split(":", 1)[1])
-        with _state_lock:
-            channels = dict(STATE.get("channels", {}))
-        items = [(cid, info.get("title", cid)) for cid, info in channels.items()]
-        if not items:
-            safe_edit_or_send(chat_id, message_id, "Hozircha ro'yxatda kanal yo'q.",
-                               reply_markup=back_to_panel_keyboard())
-            return
-        safe_edit_or_send(chat_id, message_id, f"Post yuborish uchun kanalni tanlang ({len(items)}):",
-                           reply_markup=post_pick_keyboard(items, page))
-        return
-
-    if data.startswith("post_pick:"):
-        answer_callback_query(cq_id)
-        cid = data.split(":", 1)[1]
-        with _state_lock:
-            title = STATE.get("channels", {}).get(cid, {}).get("title", cid)
-        set_pending_input(user_id, "post_channel_text", {"channel_id": cid, "channel_title": title})
-        safe_edit_or_send(
-            chat_id, message_id,
-            "Matn yozing. Emoji ID ni [ID] shaklida yozing.",
-            reply_markup=back_to_panel_keyboard(),
-        )
         return
 
     if data.startswith("channel_detail:"):
@@ -5018,25 +5109,6 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                               f"Endi shu bilan yuboraman:", decoration_key="mbe2dfffc", reply_markup=back_to_menu_keyboard())
         return True
 
-    if action == "post_channel_text":
-        clear_pending_input(user_id)
-        data = pending.get("data") or {}
-        channel_id = data.get("channel_id")
-        channel_title = data.get("channel_title", channel_id)
-        if not channel_id:
-            send_message(chat_id, "Kanal aniqlanmadi.", reply_markup=back_to_panel_keyboard())
-            return True
-        final_text, post_entities = build_post_entities_from_brackets(text)
-        if not final_text.strip():
-            send_message(chat_id, "Bo'sh matn.", reply_markup=back_to_panel_keyboard())
-            return True
-        result = send_message(channel_id, final_text, entities=post_entities or None, add_signature=False)
-        if result and result.get("ok"):
-            send_message(chat_id, f"Yuborildi: {channel_title}", reply_markup=back_to_panel_keyboard())
-        else:
-            send_message(chat_id, "Xato yuz berdi.", reply_markup=back_to_panel_keyboard())
-        return True
-
     if action == "bioclock_template":
         clear_pending_input(user_id)
         data = pending.get("data") or {}
@@ -5183,6 +5255,29 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         set_pending_input(user_id, "dm_text", {"target_id": target_id})
         send_message(chat_id, f"💬 {user_label(target_id)}ga yuboriladigan xabarni yozing:",
                      reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "usearch_id_input":
+        clear_pending_input(user_id)
+        raw = text.strip()
+        try:
+            target_id = int(raw)
+        except ValueError:
+            send_message(chat_id, "ID butun son bo'lishi kerak. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        rec = find_user_by_id(target_id)
+        if not rec:
+            send_message(chat_id, f"id:{target_id} — botda topilmadi.", reply_markup=back_to_panel_keyboard())
+            return True
+        label = user_label(target_id)
+        lines = [f"👤 <b>{label}</b> (id:{target_id})"]
+        rows = []
+        if not rec.get("username") and rec.get("last_message_id"):
+            lines.append("\nUsername yo'q — so'nggi xabarini forward qilib profilga o'tishingiz mumkin.")
+            rows.append([{"text": "↪️ So'nggi xabarini forward qilish", "callback_data": f"usearch_forward:{target_id}"}])
+        rows.append([{"text": "📋 To'liq profil", "callback_data": f"user_detail:{target_id}"}])
+        rows.append([{"text": "⬅️ User qidirish", "callback_data": "panel_user_search"}])
+        send_message(chat_id, "\n".join(lines), parse_mode_html=True, reply_markup={"inline_keyboard": rows})
         return True
 
     if action == "give_limit_amount":
@@ -6131,7 +6226,7 @@ def _webhook_impl():
 
     # ================= Shaxsiy chat (private) =================
 
-    register_known_user(user_id, from_user)
+    register_known_user(user_id, from_user, message_id=msg.get("message_id"), chat_id=chat_id)
 
     # Superadmin panelidan kutilayotgan matn kiritish bo'lsa, avval shuni tekshiramiz:
     if handle_pending_input(chat_id, user_id, text, msg.get("entities")):
