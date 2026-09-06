@@ -748,6 +748,7 @@ def default_state():
         "channels": {},  # {chat_id_str: {"title","username","added_at"}}
         "reak_modes": {},  # {chat_id_str: {"emoji","set_by","paid","set_at"}} — /reak mode: on holati
         "reak_pending": {},  # {str(user_id): {"chat_id","group_message_id","free"}} — invoice/emoji tanlash oralig'i
+        "hack_mode": False,  # global: bot admin/superadmin moderatsiya buyruqlari iz qoldirmasin
         "config": {
             "base_weekly": 7,
             "weekly_cap": 7,
@@ -813,6 +814,7 @@ def _merge_with_defaults(loaded):
     for key in ("groups", "channels", "reak_modes", "reak_pending"):
         merged.setdefault(key, {})
     merged.setdefault("processed_payments", [])
+    merged.setdefault("hack_mode", False)
     merged.setdefault("userbot_sessions", {})
     return merged
 
@@ -3389,6 +3391,8 @@ def admin_panel_keyboard(user_id):
             {"text": "📤 Eksport (CSV)", "callback_data": "panel_export"},
         ])
         rows.append([{"text": "🤖 Bot admin joylar", "callback_data": "panel_botadmin"}])
+        hack_status = "🟢 Yoqilgan" if is_hack_mode_on() else "🔴 O'chirilgan"
+        rows.append([{"text": f"🥷 Hack mode: {hack_status}", "callback_data": "toggle_hack_mode"}])
     else:
         rows.append([
             {"text": "📣 Broadcast", "callback_data": "panel_broadcast"},
@@ -4199,6 +4203,15 @@ def handle_callback_query(cq):
 
     if data == "menu_admin_panel":
         answer_callback_query(cq_id)
+        safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard(user_id))
+        return
+
+    if data == "toggle_hack_mode":
+        if user_id != SUPERADMIN_ID:
+            answer_callback_query(cq_id, "Bu faqat superadmin uchun.", show_alert=True)
+            return
+        new_value = toggle_hack_mode()
+        answer_callback_query(cq_id, "Hack mode: " + ("yoqildi 🟢" if new_value else "o'chirildi 🔴"))
         safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard(user_id))
         return
 
@@ -6009,6 +6022,21 @@ def can_disable_reak_mode(chat_id, user_id):
     return is_group_owner(chat_id, user_id)
 
 
+# ---------- Hack mode (superadmin panelidan yoqib-o'chiriladi) ----------
+
+def is_hack_mode_on():
+    with _state_lock:
+        return bool(STATE.get("hack_mode", False))
+
+
+def toggle_hack_mode():
+    with _state_lock:
+        new_value = not bool(STATE.get("hack_mode", False))
+        STATE["hack_mode"] = new_value
+        save_state_locked()
+        return new_value
+
+
 def get_reak_mode(chat_id):
     with _state_lock:
         return STATE.get("reak_modes", {}).get(str(chat_id))
@@ -6068,10 +6096,15 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             send_message(chat_id, label_or_err)
             return True
         result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
+        hush = is_admin(user_id) and is_hack_mode_on()
         if result and result.get("ok"):
-            send_message(chat_id, f"🚫 {label_or_err} guruhdan ban qilindi.")
+            if hush:
+                delete_message(chat_id, msg["message_id"])
+            else:
+                send_message(chat_id, f"🚫 {label_or_err} guruhdan ban qilindi.")
         else:
-            send_message(chat_id, "Ban qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+            if not hush:
+                send_message(chat_id, "Ban qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
         return True
 
     if stripped == ".kick" or stripped.startswith(".kick "):
@@ -6083,11 +6116,16 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             send_message(chat_id, label_or_err)
             return True
         ban_result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
+        hush = is_admin(user_id) and is_hack_mode_on()
         if ban_result and ban_result.get("ok"):
             tg_call("unbanChatMember", chat_id=chat_id, user_id=target_id, only_if_banned=True)
-            send_message(chat_id, f"👢 {label_or_err} guruhdan chiqarildi (qaytib kira oladi).")
+            if hush:
+                delete_message(chat_id, msg["message_id"])
+            else:
+                send_message(chat_id, f"👢 {label_or_err} guruhdan chiqarildi (qaytib kira oladi).")
         else:
-            send_message(chat_id, "Chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+            if not hush:
+                send_message(chat_id, "Chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
         return True
 
     if stripped.startswith(".mute"):
@@ -6114,11 +6152,16 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
                          "can_send_voice_notes": False, "can_send_polls": False, "can_send_other_messages": False,
                          "can_add_web_page_previews": False},
         )
+        hush = is_admin(user_id) and is_hack_mode_on()
         if result and result.get("ok"):
-            d, h, mi, s_, mo = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60, seconds % 60, 0
-            send_message(chat_id, f"🔇 {label_or_err} {seconds} soniyaga (~{d}k {h}s {mi}d {s_}soniya) mute qilindi.")
+            if hush:
+                delete_message(chat_id, msg["message_id"])
+            else:
+                d, h, mi, s_, mo = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60, seconds % 60, 0
+                send_message(chat_id, f"🔇 {label_or_err} {seconds} soniyaga (~{d}k {h}s {mi}d {s_}soniya) mute qilindi.")
         else:
-            send_message(chat_id, "Mute qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+            if not hush:
+                send_message(chat_id, "Mute qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
         return True
 
     if stripped == ".zipstiker":
@@ -6184,12 +6227,6 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             return True
         remove_admin(reply["from"]["id"])
         send_message(chat_id, f"❌ {requester_label(reply['from'])} bot adminligidan olindi.", decoration_key="m0bb0279d")
-        return True
-
-    if stripped == ".del":
-        if user_id != SUPERADMIN_ID or not reply:
-            return True
-        delete_message(chat_id, reply["message_id"])
         return True
 
     return False
