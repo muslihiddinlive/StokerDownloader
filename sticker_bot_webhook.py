@@ -62,12 +62,19 @@ import logging
 import tempfile
 import subprocess
 import threading
+import asyncio
 import concurrent.futures
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, request
 import requests
 import imageio_ffmpeg
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors import (
+    SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError,
+    PhoneNumberInvalidError, ApiIdInvalidError, FloodWaitError, RPCError,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sticker-bot")
@@ -687,11 +694,7 @@ def default_state():
         "business_connections": {},  # {connection_id: {"owner_id": int, "enabled": bool}}
         "keywords": {},  # {str(owner_id): [{"id","trigger","type"("exact"/"any"),"response"}]}
         "processed_payments": [],  # [telegram_payment_charge_id, ...] — dublikat to'lovni oldini olish uchun
-        "backup": {
-            "sources": {},  # {key: {owner_id, type, chat_id, title, username, business_connection_id, delivery_mode, delivery_target_chat_id, enabled_at}}
-            "log": {},      # {key: [{"ts","from_id","from_label","kind","file_id","text","orig_msg_id"}, ...]}
-        },
-        "backup_business_auto": {},  # {str(owner_id): {"enabled","delivery_mode","delivery_target_chat_id"}}
+        "userbot_sessions": {},  # {str(admin_id): {"api_id","api_hash","phone","session_string","connected_at"}}
     }
 
 
@@ -739,10 +742,7 @@ def _merge_with_defaults(loaded):
     for key in ("groups", "channels"):
         merged.setdefault(key, {})
     merged.setdefault("processed_payments", [])
-    merged.setdefault("backup", {"sources": {}, "log": {}})
-    merged["backup"].setdefault("sources", {})
-    merged["backup"].setdefault("log", {})
-    merged.setdefault("backup_business_auto", {})
+    merged.setdefault("userbot_sessions", {})
     return merged
 
 
@@ -1210,225 +1210,249 @@ def forget_channel(chat_id):
         save_state_locked()
 
 
-# ---------- Chat backup (guruh/kanal/shaxsiy chat arxivlash) ----------
-# MUHIM CHEKLOV: Bot API (oddiy ham, Business ulanish orqali ham) xabar
-# TARIXINI o'qiy olmaydi — faqat "hozirdan boshlab" kelayotgan yangi
-# xabarlarni webhook orqali ko'radi. Shuning uchun "backup" bu yerda —
-# yoqilgandan keyin kelgan xabarlarni yig'ib borish va so'rovga ko'ra
-# ZIP qilib berish degani (o'tmishni tiklab bo'lmaydi).
+# ---------- Userbot (Telethon/MTProto) backup — FAQAT admin/superadmin ----------
+# ESKI YECHIM (Bot API orqali forward qilib yig'ish) OLIB TASHLANDI — u faqat
+# "yoqilgandan keyingi" xabarlarni ko'ra olardi va bot+admin ikkalasi ham
+# o'sha chatda admin bo'lishini talab qilardi (Bot API cheklovi).
 #
-# Guruh/kanal uchun bot o'sha yerda ADMIN bo'lishi shart (aks holda
-# privacy mode tufayli faqat ba'zi xabarlarni ko'radi). Shaxsiy chat
-# uchun esa faqat Telegram Business ulanishi orqali ishlaydi (Business
-# ulanish faqat 1-1 shaxsiy chatlarga tegishli — guruh/kanalga tegishli
-# EMAS, Telegram buni shunday cheklagan).
+# YANGI YECHIM: admin o'z shaxsiy Telegram akkountini (my.telegram.org'dan
+# olingan API_ID/API_HASH + telefon raqami orqali) botga ulaydi. Shundan
+# keyin bot Telethon (MTProto) orqali o'sha akkount a'zo bo'lgan istalgan
+# chatning TO'LIQ TARIXINI o'qiy oladi — bu Bot API bilan mumkin emas edi.
+#
+# ⚠️ XAVFSIZLIK: bu — juda kuchli huquq (ulangan akkountga TO'LIQ kirish).
+# Shuning uchun bu funksiya FAQAT is_admin() bo'lganlar uchun ochiq.
+# Session (STATE ichida, boshqa hamma narsa bilan birga DB guruhida
+# saqlanadi) — kimda bo'lsa, o'sha odam ulangan akkountga kira oladi.
+# Buni faqat to'liq ishonadigan adminlaringizga bering.
 
-BACKUP_RANGES = [
+_userbot_loop = asyncio.new_event_loop()
+
+
+def _userbot_loop_runner():
+    asyncio.set_event_loop(_userbot_loop)
+    _userbot_loop.run_forever()
+
+
+threading.Thread(target=_userbot_loop_runner, daemon=True, name="userbot-loop").start()
+
+
+def run_userbot_coro(coro, timeout=120):
+    """Flask (sinxron) handlerlardan Telethon (asinxron) kodini xavfsiz
+    chaqirish uchun. Coroutine tugaguncha (yoki timeout bo'lguncha) kutadi."""
+    future = asyncio.run_coroutine_threadsafe(coro, _userbot_loop)
+    return future.result(timeout=timeout)
+
+
+# admin_id -> ulangan (authorize qilingan) Telethon client keshi (RAMda)
+_userbot_clients = {}
+# admin_id -> login jarayoni davomidagi vaqtinchalik holat
+# {"client","api_id","api_hash","phone","phone_code_hash"}
+_userbot_login_state = {}
+# admin_id -> so'nggi ko'rsatilgan dialoglar ro'yxati (RAMda, STATE'ga
+# YOZILMAYDI — bu shunchaki UI keshi, persistent state bilan aralashtirib
+# uni shishirmaslik kerak, aks holda backup o'zi qayta ixtiro qilgan
+# muammoga uchraymiz)
+_userbot_dialog_cache = {}
+
+
+def get_userbot_session(admin_id):
+    with _state_lock:
+        return STATE.get("userbot_sessions", {}).get(str(admin_id))
+
+
+def save_userbot_session(admin_id, **fields):
+    with _state_lock:
+        sessions = STATE.setdefault("userbot_sessions", {})
+        rec = sessions.setdefault(str(admin_id), {})
+        rec.update(fields)
+        save_state_locked()
+    force_flush_state()
+
+
+def delete_userbot_session(admin_id):
+    with _state_lock:
+        STATE.setdefault("userbot_sessions", {}).pop(str(admin_id), None)
+        save_state_locked()
+    force_flush_state()
+    _userbot_clients.pop(admin_id, None)
+
+
+async def _get_authorized_client(admin_id):
+    """Adminning saqlangan sessiyasidan ulangan Telethon client qaytaradi,
+    yoki sessiya yo'q/eskirgan/bekor qilingan bo'lsa None."""
+    cached = _userbot_clients.get(admin_id)
+    if cached is not None:
+        try:
+            if not cached.is_connected():
+                await cached.connect()
+            if cached.is_connected() and await cached.is_user_authorized():
+                return cached
+        except Exception:
+            pass
+        _userbot_clients.pop(admin_id, None)
+
+    sess = get_userbot_session(admin_id)
+    if not sess or not sess.get("session_string"):
+        return None
+    client = TelegramClient(
+        StringSession(sess["session_string"]), int(sess["api_id"]), sess["api_hash"],
+    )
+    await client.connect()
+    if not await client.is_user_authorized():
+        return None
+    _userbot_clients[admin_id] = client
+    return client
+
+
+async def _userbot_send_code(admin_id, api_id, api_hash, phone):
+    """Yangi (hali autentifikatsiya qilinmagan) client yaratadi va SMS/Telegram
+    kod yuborishni so'raydi. Client _userbot_login_state ichida vaqtinchalik
+    saqlanadi (keyingi qadam — kodni tasdiqlash — shu clientni ishlatadi)."""
+    client = TelegramClient(StringSession(), int(api_id), api_hash)
+    await client.connect()
+    sent = await client.send_code_request(phone)
+    _userbot_login_state[admin_id] = {
+        "client": client, "api_id": int(api_id), "api_hash": api_hash,
+        "phone": phone, "phone_code_hash": sent.phone_code_hash,
+    }
+
+
+async def _userbot_sign_in_code(admin_id, code):
+    """Qaytaradi: 'ok' | 'need_password' — xato bo'lsa exception ko'tariladi
+    (chaqiruvchi tomonda ushlanadi)."""
+    st = _userbot_login_state.get(admin_id)
+    if not st:
+        raise RuntimeError("Login sessiyasi topilmadi, qaytadan boshlang.")
+    client = st["client"]
+    try:
+        await client.sign_in(phone=st["phone"], code=code, phone_code_hash=st["phone_code_hash"])
+    except SessionPasswordNeededError:
+        return "need_password"
+    return "ok"
+
+
+async def _userbot_sign_in_password(admin_id, password):
+    st = _userbot_login_state.get(admin_id)
+    if not st:
+        raise RuntimeError("Login sessiyasi topilmadi, qaytadan boshlang.")
+    await st["client"].sign_in(password=password)
+    return "ok"
+
+
+def _userbot_finalize_login(admin_id):
+    """Muvaffaqiyatli sign_in'dan keyin: session_string'ni saqlaydi va
+    clientni doimiy keshga o'tkazadi (qayta ulanishga hojat qolmaydi)."""
+    st = _userbot_login_state.pop(admin_id, None)
+    if not st:
+        return None
+    client = st["client"]
+    session_string = client.session.save()
+    save_userbot_session(
+        admin_id, api_id=st["api_id"], api_hash=st["api_hash"],
+        phone=st["phone"], session_string=session_string,
+        connected_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _userbot_clients[admin_id] = client
+    return st["phone"]
+
+
+async def _userbot_list_dialogs(admin_id, limit=80):
+    client = await _get_authorized_client(admin_id)
+    if client is None:
+        return None
+    dialogs = await client.get_dialogs(limit=limit)
+    out = []
+    for d in dialogs:
+        out.append({
+            "id": d.id,
+            "title": (d.name or getattr(d.entity, "title", None) or str(d.id))[:60],
+            "is_group": bool(d.is_group),
+            "is_channel": bool(d.is_channel) and not d.is_group,
+            "is_user": bool(d.is_user),
+        })
+    return out
+
+
+USERBOT_BACKUP_RANGES = [
     ("1d", "🕐 Oxirgi 1 kun", 1),
     ("1w", "📅 Oxirgi 1 hafta", 7),
     ("1m", "🗓 Oxirgi 1 oy", 30),
     ("1y", "📆 Oxirgi 1 yil", 365),
+    ("all", "♾ Butun tarix", None),
 ]
-BACKUP_LOG_MAX_PER_SOURCE = 8000  # bitta chat uchun saqlanadigan maksimal yozuv soni
-BACKUP_RETAIN_DAYS = 400  # bundan eski yozuvlar avtomatik tozalanadi
+USERBOT_MAX_MESSAGES = 20000  # bitta eksportda o'qiladigan maksimal xabar soni (server resurslarini himoya qilish)
 
 
-def backup_source_key(chat_id, business_connection_id=None):
-    """Guruh/kanal uchun kalit = str(chat_id). Shaxsiy (business) chat uchun
-    business_connection_id ham qo'shiladi — aks holda ikki xil business
-    egasi bitta xaridor bilan gaplashsa, chat_id bir xil bo'lib qolib,
-    ma'lumotlar aralashib ketishi mumkin edi."""
-    if business_connection_id:
-        return f"biz:{business_connection_id}:{chat_id}"
-    return str(chat_id)
-
-
-def get_backup_source(key):
-    with _state_lock:
-        return STATE.get("backup", {}).get("sources", {}).get(key)
-
-
-def get_backup_sources_for_owner(owner_id):
-    with _state_lock:
-        sources = STATE.get("backup", {}).get("sources", {})
-        return [dict(v, key=k) for k, v in sources.items() if v.get("owner_id") == owner_id]
-
-
-def enable_backup_source(key, owner_id, chat_type, chat_id, title, username=None,
-                          business_connection_id=None):
-    with _state_lock:
-        sources = STATE.setdefault("backup", {}).setdefault("sources", {})
-        existing = sources.get(key, {})
-        sources[key] = {
-            "owner_id": owner_id,
-            "type": chat_type,  # "group" | "channel" | "private"
-            "chat_id": chat_id,
-            "title": title,
-            "username": username,
-            "business_connection_id": business_connection_id,
-            "enabled_at": existing.get("enabled_at") or datetime.now(timezone.utc).isoformat(),
-            "delivery_mode": existing.get("delivery_mode", "zip_self"),
-            "delivery_target_chat_id": existing.get("delivery_target_chat_id"),
-        }
-        save_state_locked()
-
-
-def disable_backup_source(key):
-    with _state_lock:
-        STATE.setdefault("backup", {}).setdefault("sources", {}).pop(key, None)
-        STATE.setdefault("backup", {}).setdefault("log", {}).pop(key, None)
-        save_state_locked()
-
-
-def set_backup_delivery(key, mode, target_chat_id=None):
-    with _state_lock:
-        src = STATE.setdefault("backup", {}).setdefault("sources", {}).get(key)
-        if not src:
-            return False
-        src["delivery_mode"] = mode
-        src["delivery_target_chat_id"] = target_chat_id
-        save_state_locked()
-        return True
-
-
-def get_backup_business_auto(owner_id):
-    with _state_lock:
-        return STATE.get("backup_business_auto", {}).get(str(owner_id), {"enabled": False})
-
-
-def set_backup_business_auto(owner_id, enabled, delivery_mode="zip_self", delivery_target_chat_id=None):
-    with _state_lock:
-        cfg = STATE.setdefault("backup_business_auto", {}).setdefault(str(owner_id), {})
-        cfg["enabled"] = enabled
-        if enabled:
-            cfg["delivery_mode"] = delivery_mode
-            cfg["delivery_target_chat_id"] = delivery_target_chat_id
-        save_state_locked()
-
-
-def extract_generic_backup_content(msg):
-    """Xabardan (kind, file_id, text) ni umumiy holda ajratib oladi — backup
-    barcha turdagi xabarlarni yig'ishi kerak, shuning uchun mavjud
-    extract_single_sticker_file/extract_video_file kabi ixtisoslashgan
-    funksiyalar o'rniga shu umumiy versiyasi ishlatiladi."""
-    if msg.get("photo"):
-        return "photo", msg["photo"][-1]["file_id"], msg.get("caption", "")
-    for field, kind in (
-        ("video", "video"), ("document", "document"), ("voice", "voice"),
-        ("audio", "audio"), ("video_note", "video_note"),
-        ("animation", "animation"), ("sticker", "sticker"),
-    ):
-        if msg.get(field):
-            return kind, msg[field]["file_id"], msg.get("caption", "")
-    return "text", None, msg.get("text", "")
-
-
-def log_backup_message(key, msg, business_connection_id=None):
-    src = get_backup_source(key)
-    if not src:
-        return
-    from_user = msg.get("from", {}) or {}
-    kind, file_id, text = extract_generic_backup_content(msg)
-    entry = {
-        "ts": msg.get("date") or int(time.time()),
-        "from_id": from_user.get("id"),
-        "from_label": requester_label(from_user),
-        "kind": kind,
-        "file_id": file_id,
-        "text": (text or "")[:1000],
-        "orig_msg_id": msg.get("message_id"),
-    }
-    with _state_lock:
-        log_map = STATE.setdefault("backup", {}).setdefault("log", {})
-        entries = log_map.setdefault(key, [])
-        entries.append(entry)
-        cutoff = time.time() - BACKUP_RETAIN_DAYS * 86400
-        entries[:] = [e for e in entries if e["ts"] >= cutoff]
-        if len(entries) > BACKUP_LOG_MAX_PER_SOURCE:
-            del entries[:len(entries) - BACKUP_LOG_MAX_PER_SOURCE]
-        save_state_locked()
-
-    if src.get("delivery_mode") == "forward_group" and src.get("delivery_target_chat_id"):
-        run_safe_thread(
-            _relay_backup_message, src, entry, msg.get("chat", {}).get("id"), business_connection_id,
-        )
-
-
-def _relay_backup_message(src, entry, source_chat_id, business_connection_id):
-    target = src["delivery_target_chat_id"]
-    label = f"🗄 {src.get('title')}\n👤 {entry['from_label']} (id: {entry['from_id']})"
-    send_message(target, label)
-    try:
-        if business_connection_id:
-            # ESLATMA: bu Business xabari — oddiy forwardMessage bunday xabarlar
-            # uchun ishlamasligi mumkin (Telegram business chat'lar uchun alohida
-            # cheklov qo'ygan bo'lishi ehtimoli bor, jonli botda tekshirilishi kerak).
-            # copyMessage bilan urinamiz, ishlamasa hech bo'lmasa matn saqlanadi.
-            result = tg_call("copyMessage", chat_id=target, from_chat_id=source_chat_id,
-                              message_id=entry["orig_msg_id"])
-            if not result.get("ok") and entry.get("text"):
-                send_message(target, entry["text"])
-        else:
-            tg_call("forwardMessage", chat_id=target, from_chat_id=source_chat_id,
-                    message_id=entry["orig_msg_id"])
-    except Exception as e:
-        log.warning("Backup relay xato (source=%s): %s", source_chat_id, e)
-
-
-def _fetch_backup_file(i, entry):
-    try:
-        file_path = get_file_path(entry["file_id"])
-        if not file_path:
-            return i, None, None
-        content = download_file_bytes(file_path)
-        ext = os.path.splitext(file_path)[1] or ""
-        fname = f"{i:04d}_{entry['kind']}{ext}"
-        return i, fname, content
-    except Exception as e:
-        log.warning("Backup fayl yuklashda xato: %s", e)
-        return i, None, None
-
-
-def build_backup_zip(key, days):
-    with _state_lock:
-        entries = list(STATE.get("backup", {}).get("log", {}).get(key, []))
-    cutoff = time.time() - days * 86400
-    entries = [e for e in entries if e["ts"] >= cutoff]
-    if not entries:
+async def _userbot_build_backup_zip(admin_id, dialog_id, days):
+    """Tanlangan chat/kanal/guruhning TO'LIQ tarixini (yoki so'nggi `days`
+    kunini) Telethon orqali o'qib, matn+media bilan ZIP tayyorlaydi.
+    Qaytaradi: (BytesIO yoki None, xabarlar soni)."""
+    client = await _get_authorized_client(admin_id)
+    if client is None:
         return None, 0
-    media_jobs = [(i, e) for i, e in enumerate(entries, start=1) if e.get("file_id")]
-    results = {}
-    if media_jobs:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(_fetch_backup_file, i, e) for i, e in media_jobs]
-            for fut in concurrent.futures.as_completed(futures):
-                i, fname, content = fut.result()
-                if fname is not None:
-                    results[i] = (fname, content)
+
+    cutoff = None
+    if days:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    entries = []
+    media_jobs = []
+    async for msg in client.iter_messages(dialog_id, reverse=False, limit=USERBOT_MAX_MESSAGES):
+        if cutoff and msg.date and msg.date < cutoff:
+            break
+        sender_label = "?"
+        try:
+            sender = await msg.get_sender()
+            if sender is not None:
+                uname = getattr(sender, "username", None)
+                fname = getattr(sender, "first_name", "") or ""
+                lname = getattr(sender, "last_name", "") or ""
+                sender_label = f"@{uname}" if uname else (f"{fname} {lname}".strip() or str(getattr(sender, "id", "?")))
+        except Exception:
+            pass
+        entry = {
+            "id": msg.id,
+            "date": msg.date.isoformat() if msg.date else None,
+            "from": sender_label,
+            "text": msg.message or "",
+            "media_name": None,
+        }
+        if msg.media:
+            fname = f"media_{msg.id}"
+            entry["media_name"] = fname
+            media_jobs.append((fname, msg))
+        entries.append(entry)
+
     buf = io.BytesIO()
-    lines = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for i, e in enumerate(entries, start=1):
-            dt = datetime.fromtimestamp(e["ts"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            media_note = f" [fayl: {results[i][0]}]" if i in results else ""
-            lines.append(f"[{dt}] {e['from_label']} (id:{e['from_id']}): {e.get('text', '')}{media_note}")
-            if i in results:
-                fname, content = results[i]
-                zf.writestr(fname, content)
-        zf.writestr("_chat_log.txt", "\n".join(lines))
+        zf.writestr("messages.json", json.dumps(entries, ensure_ascii=False, indent=2))
+        for fname, msg in media_jobs:
+            try:
+                data = await client.download_media(msg, file=bytes)
+                if data:
+                    zf.writestr(f"media/{fname}", data)
+            except Exception as e:
+                log.warning("Userbot media yuklashda xato (msg_id=%s): %s", msg.id, e)
     buf.seek(0)
     return buf, len(entries)
 
 
-def _send_backup_zip(key, src, days, user_id):
-    buf, count = build_backup_zip(key, days)
-    if not buf:
-        send_message(user_id, "Bu davr uchun hech qanday zaxiralangan xabar topilmadi.")
+def _send_userbot_backup_zip(admin_id, dialog_id, dialog_title, days, chat_id):
+    """run_safe_thread orqali fonda ishlaydi — katta chatlarni o'qish
+    vaqt olishi mumkin, webhook'ni bloklamaslik uchun."""
+    try:
+        buf, count = run_userbot_coro(_userbot_build_backup_zip(admin_id, dialog_id, days), timeout=600)
+    except Exception as e:
+        log.exception("Userbot backup xatosi: %s", e)
+        send_message(chat_id, f"❌ Backup olishda xato: {e}")
         return
-    safe_title = re.sub(r"[^\w\-]+", "_", src.get("title", "chat"))[:40]
-    fname = f"backup_{safe_title}_{days}kun.zip"
-    send_document_bytes(user_id, fname, buf.getvalue(), caption=f"🗄 {src.get('title')} — {count} ta xabar")
-
+    if not buf or count == 0:
+        send_message(chat_id, "Bu davr uchun hech qanday xabar topilmadi.")
+        return
+    safe_title = re.sub(r"[^\w\-]+", "_", str(dialog_title))[:40]
+    fname = f"backup_{safe_title}.zip"
+    send_document_bytes(chat_id, fname, buf.getvalue(), caption=f"🗄 {dialog_title} — {count} ta xabar (API orqali, to'liq tarix)")
 
 # ---------- Majburiy / bonus kanallar ----------
 
@@ -3213,7 +3237,6 @@ def main_menu_keyboard(user_id):
         [{"text": "🏆 Reyting", "callback_data": "menu_leaderboard"}],
         [{"text": "🔑 Avto-javob (Business)", "callback_data": "menu_keywords"}],
         [{"text": "🕐 Bio soat (Business)", "callback_data": "menu_bioclock"}],
-        [{"text": "🗄 Backup", "callback_data": "menu_backup"}],
     ]
     if is_admin(user_id):
         rows.append([{"text": "👑 Superadmin panel" if user_id == SUPERADMIN_ID else "🛠 Admin panel",
@@ -3243,6 +3266,7 @@ def admin_panel_keyboard(user_id):
             {"text": "🔒 Majburiy kanallar", "callback_data": "panel_forcechannels"},
             {"text": "🎁 Bonus kanallar", "callback_data": "panel_bonuschannels"},
         ],
+        [{"text": "🗄 Backup (API orqali, to'liq tarix)", "callback_data": "userbot_menu"}],
     ]
     if is_super:
         rows.append([
@@ -3517,160 +3541,129 @@ def handle_callback_query(cq):
         return
 
     # ---------- Backup ----------
-    if data == "menu_backup":
+    # ---------- Userbot (Telethon) backup — FAQAT admin/superadmin ----------
+    if data == "userbot_menu":
         answer_callback_query(cq_id)
-        rows = []
-        for cid_str, g in STATE.get("groups", {}).items():
-            if get_chat_member_status(int(cid_str), user_id) in ("administrator", "creator"):
-                key = backup_source_key(cid_str)
-                mark = "✅ " if get_backup_source(key) else ""
-                rows.append([{"text": f"{mark}👥 {g.get('title', cid_str)}", "callback_data": f"backup_toggle:{key}"}])
-        for cid_str, c in STATE.get("channels", {}).items():
-            if get_chat_member_status(int(cid_str), user_id) in ("administrator", "creator"):
-                key = backup_source_key(cid_str)
-                mark = "✅ " if get_backup_source(key) else ""
-                rows.append([{"text": f"{mark}📢 {c.get('title', cid_str)}", "callback_data": f"backup_toggle:{key}"}])
-        biz_conn = get_business_connection_id(user_id)
-        if biz_conn:
-            auto = get_backup_business_auto(user_id)
-            mark = "✅ " if auto.get("enabled") else ""
-            rows.append([{"text": f"{mark}👤 Shaxsiy chatlar (Business)", "callback_data": "backup_toggle_business"}])
-        found_any = bool(rows)
-        if get_backup_sources_for_owner(user_id):
-            rows.append([{"text": "📤 ZIP olish (eksport)", "callback_data": "backup_export_menu"}])
-        rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
-        text = (
-            "🗄 <b>Backup</b>\n\n"
-            "Zaxiralamoqchi bo'lgan guruh/kanalni tanlang (bosilsa yoqiladi/o'chiriladi). "
-            "Faqat siz admin bo'lgan va bot ham admin bo'lgan joylar ko'rinadi.\n\n"
-            "⚠️ Bot eski xabarlarni ko'ra olmaydi — faqat yoqilgandan keyin kelgan "
-            "xabarlar zaxiralanadi."
+        if not is_admin(user_id):
+            return
+        sess = get_userbot_session(user_id)
+        if sess and sess.get("session_string"):
+            phone = sess.get("phone", "?")
+            text = (
+                f"🗄 <b>Backup (API orqali)</b>\n\n"
+                f"✅ Ulangan akkount: {phone}\n\n"
+                f"Bu — Bot API emas, sizning shaxsiy Telegram akkountingiz orqali ishlaydi "
+                f"va istalgan chatning <u>TO'LIQ TARIXINI</u> o'qiy oladi (bot admin bo'lishi shart emas)."
+            )
+            keyboard = {"inline_keyboard": [
+                [{"text": "📂 Chatlar ro'yxati", "callback_data": "userbot_dialogs:0"}],
+                [{"text": "🔌 Akkountni uzish", "callback_data": "userbot_disconnect"}],
+                [{"text": "⬅️ Admin panel", "callback_data": "menu_admin_panel"}],
+            ]}
+        else:
+            text = (
+                "🗄 <b>Backup (API orqali)</b>\n\n"
+                "Bu funksiya ishlashi uchun shaxsiy Telegram akkountingizni botga ulashingiz kerak "
+                "(my.telegram.org saytidan olinadigan API_ID/API_HASH + telefon raqamingiz orqali).\n\n"
+                "⚠️ <b>Diqqat:</b> ulangandan keyin bot sizning akkountingiz nomidan Telegram'ga "
+                "so'rov yubora oladi — bu amalda akkountingizga to'liq kirish huquqi degani. "
+                "Faqat o'zingiz to'liq ishonadigan holatda davom eting."
+            )
+            keyboard = {"inline_keyboard": [
+                [{"text": "🔑 Akkountni ulash", "callback_data": "userbot_connect_start"}],
+                [{"text": "⬅️ Admin panel", "callback_data": "menu_admin_panel"}],
+            ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data == "userbot_connect_start":
+        answer_callback_query(cq_id)
+        if not is_admin(user_id):
+            return
+        set_pending_input(user_id, "userbot_api_id", {})
+        safe_edit_or_send(
+            chat_id, message_id,
+            "1/4 — my.telegram.org saytidan olingan <b>API_ID</b> raqamingizni yuboring:",
+            parse_mode_html=True, reply_markup=back_to_panel_keyboard(),
         )
-        if not found_any and not biz_conn:
-            text += "\n\nHozircha mos guruh/kanal topilmadi (bot admin bo'lgan joy yo'q)."
-        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup={"inline_keyboard": rows})
         return
 
-    if data.startswith("backup_toggle:"):
+    if data == "userbot_disconnect":
         answer_callback_query(cq_id)
-        key = data.split(":", 1)[1]
-        if get_backup_source(key):
-            disable_backup_source(key)
-            safe_edit_or_send(chat_id, message_id, "❌ Backup o'chirildi.", reply_markup=back_to_menu_keyboard())
+        if not is_admin(user_id):
             return
-        raw_chat_id = int(key)
-        if get_chat_member_status(raw_chat_id, user_id) not in ("administrator", "creator"):
-            answer_callback_query(cq_id, "Siz bu joyda admin emassiz.", show_alert=True)
-            return
-        if not bot_is_group_admin(raw_chat_id):
-            answer_callback_query(cq_id, "Bot bu joyda admin bo'lishi kerak (barcha xabarlarni ko'rish uchun).",
-                                   show_alert=True)
-            return
-        is_channel = key in STATE.get("channels", {})
-        chat_info = STATE.get("channels", {}).get(key) or STATE.get("groups", {}).get(key) or {}
-        enable_backup_source(key, user_id, "channel" if is_channel else "group", raw_chat_id,
-                              chat_info.get("title", key), username=chat_info.get("username"))
-        keyboard = {"inline_keyboard": [
-            [{"text": "📦 Shu chatga ZIP (menga)", "callback_data": f"backup_delivery:{key}:zip_self"}],
-            [{"text": "📤 Boshqa guruh/kanalga forward", "callback_data": f"backup_delivery:{key}:forward_group"}],
-        ]}
-        safe_edit_or_send(chat_id, message_id, "✅ Yoqildi. Endi qanday olmoqchisiz?", reply_markup=keyboard)
+        delete_userbot_session(user_id)
+        safe_edit_or_send(chat_id, message_id, "🔌 Akkount uzildi.", reply_markup=back_to_panel_keyboard())
         return
 
-    if data.startswith("backup_delivery:"):
-        answer_callback_query(cq_id)
-        key, mode = data.split(":", 1)[1].rsplit(":", 1)
-        if mode == "zip_self":
-            set_backup_delivery(key, "zip_self")
+    if data.startswith("userbot_dialogs:"):
+        answer_callback_query(cq_id, "Yuklanmoqda...")
+        if not is_admin(user_id):
+            return
+        page = int(data.split(":", 1)[1])
+        try:
+            dialogs = run_userbot_coro(_userbot_list_dialogs(user_id))
+        except Exception as e:
+            log.exception("Userbot dialog ro'yxatini olishda xato: %s", e)
+            safe_edit_or_send(chat_id, message_id, f"❌ Xato: {e}", reply_markup=back_to_panel_keyboard())
+            return
+        if dialogs is None:
             safe_edit_or_send(
                 chat_id, message_id,
-                "✅ Tayyor. Xabarlar yig'ib boriladi, \"📤 ZIP olish\" orqali istalgan payt yuklab olasiz.",
-                reply_markup=back_to_menu_keyboard(),
+                "❌ Akkount ulanmagan yoki sessiya o'chgan (masalan boshqa qurilmadan chiqib ketilgan bo'lishi "
+                "mumkin). Qaytadan ulang.",
+                reply_markup=back_to_panel_keyboard(),
             )
             return
-        if mode == "forward_group":
-            set_pending_input(user_id, "backup_target_chat", {"key": key})
-            safe_edit_or_send(
-                chat_id, message_id,
-                "Bot admin qilib qo'yilgan guruh/kanalning username (@...) yoki ID sini yozing:",
-                reply_markup=back_to_menu_keyboard(),
-            )
-            return
+        _userbot_dialog_cache[user_id] = dialogs
+        items = [
+            (d["id"], (("👥 " if d["is_group"] else "📢 " if d["is_channel"] else "👤 ") + d["title"]))
+            for d in dialogs
+        ]
+        PAGE_SIZE = 8
+        start_idx = page * PAGE_SIZE
+        rows = [[{"text": label[:60], "callback_data": f"userbot_pick:{did}"}]
+                for did, label in items[start_idx:start_idx + PAGE_SIZE]]
+        nav = []
+        if page > 0:
+            nav.append({"text": "⬅️", "callback_data": f"userbot_dialogs:{page - 1}"})
+        if start_idx + PAGE_SIZE < len(items):
+            nav.append({"text": "➡️", "callback_data": f"userbot_dialogs:{page + 1}"})
+        if nav:
+            rows.append(nav)
+        rows.append([{"text": "⬅️ Orqaga", "callback_data": "userbot_menu"}])
+        safe_edit_or_send(chat_id, message_id, f"📂 Zaxiralamoqchi bo'lgan chatni tanlang ({len(items)}):",
+                           reply_markup={"inline_keyboard": rows})
         return
 
-    if data == "backup_toggle_business":
+    if data.startswith("userbot_pick:"):
         answer_callback_query(cq_id)
-        if not get_business_connection_id(user_id):
-            answer_callback_query(cq_id, "Business ulanish faol emas.", show_alert=True)
+        if not is_admin(user_id):
             return
-        auto = get_backup_business_auto(user_id)
-        if auto.get("enabled"):
-            set_backup_business_auto(user_id, False)
-            safe_edit_or_send(chat_id, message_id, "❌ Shaxsiy chat backup o'chirildi.",
-                               reply_markup=back_to_menu_keyboard())
-            return
-        keyboard = {"inline_keyboard": [
-            [{"text": "📦 Shu chatga ZIP (menga)", "callback_data": "backup_delivery_biz:zip_self"}],
-            [{"text": "📤 Boshqa guruh/kanalga forward", "callback_data": "backup_delivery_biz:forward_group"}],
-        ]}
-        safe_edit_or_send(chat_id, message_id, "Shaxsiy chatlar uchun qanday olmoqchisiz?", reply_markup=keyboard)
+        dialog_id = int(data.split(":", 1)[1])
+        rows = [[{"text": label, "callback_data": f"userbot_run:{dialog_id}:{code}"}]
+                for code, label, _days in USERBOT_BACKUP_RANGES]
+        rows.append([{"text": "⬅️ Orqaga", "callback_data": "userbot_dialogs:0"}])
+        safe_edit_or_send(chat_id, message_id, "Qaysi davr uchun zaxira olamiz?",
+                           reply_markup={"inline_keyboard": rows})
         return
 
-    if data.startswith("backup_delivery_biz:"):
-        answer_callback_query(cq_id)
-        mode = data.split(":", 1)[1]
-        if mode == "zip_self":
-            set_backup_business_auto(user_id, True, delivery_mode="zip_self")
-            safe_edit_or_send(
-                chat_id, message_id,
-                "✅ Yoqildi. Yangi shaxsiy xabarlar (Business orqali) avtomatik zaxiralanadi.",
-                reply_markup=back_to_menu_keyboard(),
-            )
+    if data.startswith("userbot_run:"):
+        answer_callback_query(cq_id, "Boshlandi, kuting...")
+        if not is_admin(user_id):
             return
-        if mode == "forward_group":
-            set_pending_input(user_id, "backup_target_chat", {"key": "business"})
-            safe_edit_or_send(
-                chat_id, message_id,
-                "Bot admin qilib qo'yilgan guruh/kanalning username (@...) yoki ID sini yozing:",
-                reply_markup=back_to_menu_keyboard(),
-            )
-            return
-        return
-
-    if data == "backup_export_menu":
-        answer_callback_query(cq_id)
-        my_sources = get_backup_sources_for_owner(user_id)
-        if not my_sources:
-            safe_edit_or_send(chat_id, message_id, "Hali yoqilgan backup yo'q.", reply_markup=back_to_menu_keyboard())
-            return
-        icon = {"private": "👤", "channel": "📢"}
-        rows = [[{"text": f"{icon.get(s['type'], '👥')} {s['title']}",
-                  "callback_data": f"backup_export_pick:{s['key']}"}] for s in my_sources]
-        rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
-        safe_edit_or_send(chat_id, message_id, "Qaysi chat uchun ZIP olasiz?", reply_markup={"inline_keyboard": rows})
-        return
-
-    if data.startswith("backup_export_pick:"):
-        answer_callback_query(cq_id)
-        key = data.split(":", 1)[1]
-        rows = [[{"text": label, "callback_data": f"backup_export_run:{key}:{code}"}]
-                for code, label, _days in BACKUP_RANGES]
-        rows.append([{"text": "⬅️ Orqaga", "callback_data": "backup_export_menu"}])
-        safe_edit_or_send(chat_id, message_id, "Qaysi davr uchun?", reply_markup={"inline_keyboard": rows})
-        return
-
-    if data.startswith("backup_export_run:"):
-        answer_callback_query(cq_id, "Tayyorlanmoqda...")
-        key, code = data.split(":", 1)[1].rsplit(":", 1)
-        days = next((d for c, _l, d in BACKUP_RANGES if c == code), 7)
-        src = get_backup_source(key)
-        if not src or src.get("owner_id") != user_id:
-            safe_edit_or_send(chat_id, message_id, "Bu backup sizga tegishli emas.",
-                               reply_markup=back_to_menu_keyboard())
-            return
-        run_safe_thread(_send_backup_zip, key, src, days, user_id, chat_id=user_id)
-        safe_edit_or_send(chat_id, message_id, "📦 ZIP tayyorlanmoqda, tez orada yuboriladi...",
-                           reply_markup=back_to_menu_keyboard())
+        _, dialog_id_s, code = data.split(":", 2)
+        dialog_id = int(dialog_id_s)
+        days = next((d for c, _l, d in USERBOT_BACKUP_RANGES if c == code), 7)
+        cached = _userbot_dialog_cache.get(user_id, [])
+        title = next((d["title"] for d in cached if d["id"] == dialog_id), str(dialog_id))
+        run_safe_thread(_send_userbot_backup_zip, user_id, dialog_id, title, days, user_id, chat_id=user_id)
+        safe_edit_or_send(
+            chat_id, message_id,
+            "📦 To'liq tarix o'qilmoqda va ZIP tayyorlanmoqda — katta chatlar uchun bir necha "
+            "daqiqa vaqt olishi mumkin, tayyor bo'lgach avtomatik yuboriladi...",
+            reply_markup=back_to_panel_keyboard(),
+        )
         return
 
     if data == "menu_bioclock":
@@ -4869,23 +4862,92 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         _run_publish_flow(user_id, data)
         return True
 
-    if action == "backup_target_chat":
+    if action == "userbot_api_id":
         clear_pending_input(user_id)
-        resolved = _resolve_chat(text.strip())
-        if not resolved:
-            send_message(chat_id, "Chat topilmadi. Username yoki ID to'g'ri ekanini tekshiring.")
+        if not is_admin(user_id):
             return True
-        if not bot_is_group_admin(resolved["chat_id"]):
-            send_message(chat_id, "Bot o'sha joyda admin emas. Avval botni o'sha guruh/kanalga admin qiling.")
+        raw = text.strip()
+        if not raw.isdigit():
+            send_message(chat_id, "❌ API_ID faqat raqamlardan iborat bo'lishi kerak. Qaytadan boshlang: /start")
             return True
-        target_key = pending["data"].get("key")
-        if target_key == "business":
-            set_backup_business_auto(user_id, True, delivery_mode="forward_group",
-                                      delivery_target_chat_id=resolved["chat_id"])
-            send_message(chat_id, f"✅ Yoqildi. Shaxsiy xabarlar \"{resolved['title']}\" ga forward qilinadi.")
-        else:
-            set_backup_delivery(target_key, "forward_group", resolved["chat_id"])
-            send_message(chat_id, f"✅ Yoqildi. Xabarlar \"{resolved['title']}\" ga forward qilinadi.")
+        set_pending_input(user_id, "userbot_api_hash", {"api_id": raw})
+        send_message(chat_id, "2/4 — endi <b>API_HASH</b> qatoringizni yuboring:", parse_mode_html=True)
+        return True
+
+    if action == "userbot_api_hash":
+        clear_pending_input(user_id)
+        if not is_admin(user_id):
+            return True
+        api_hash = text.strip()
+        api_id = pending["data"].get("api_id")
+        set_pending_input(user_id, "userbot_phone", {"api_id": api_id, "api_hash": api_hash})
+        send_message(chat_id, "3/4 — telefon raqamingizni xalqaro formatda yuboring (masalan: +998901234567):")
+        return True
+
+    if action == "userbot_phone":
+        clear_pending_input(user_id)
+        if not is_admin(user_id):
+            return True
+        phone = text.strip()
+        api_id = pending["data"].get("api_id")
+        api_hash = pending["data"].get("api_hash")
+        try:
+            run_userbot_coro(_userbot_send_code(user_id, api_id, api_hash, phone))
+        except ApiIdInvalidError:
+            send_message(chat_id, "❌ API_ID/API_HASH noto'g'ri. Qaytadan boshlang: /start")
+            return True
+        except PhoneNumberInvalidError:
+            send_message(chat_id, "❌ Telefon raqam formati noto'g'ri. Qaytadan boshlang: /start")
+            return True
+        except FloodWaitError as e:
+            send_message(chat_id, f"⏳ Juda ko'p urinish, {e.seconds} soniyadan keyin qaytadan urinib ko'ring.")
+            return True
+        except Exception as e:
+            log.exception("Userbot send_code xatosi: %s", e)
+            send_message(chat_id, f"❌ Xato: {e}\nQaytadan boshlang: /start")
+            return True
+        set_pending_input(user_id, "userbot_code", {})
+        send_message(chat_id, "4/4 — Telegram sizga (shu botga emas, asosiy Telegram ilovangizga) "
+                               "yuborgan tasdiqlash kodini kiriting:")
+        return True
+
+    if action == "userbot_code":
+        clear_pending_input(user_id)
+        if not is_admin(user_id):
+            return True
+        code = text.strip()
+        try:
+            result = run_userbot_coro(_userbot_sign_in_code(user_id, code))
+        except (PhoneCodeInvalidError, PhoneCodeExpiredError):
+            send_message(chat_id, "❌ Kod noto'g'ri yoki eskirgan. Qaytadan boshlang: /start")
+            return True
+        except Exception as e:
+            log.exception("Userbot sign_in (code) xatosi: %s", e)
+            send_message(chat_id, f"❌ Xato: {e}\nQaytadan boshlang: /start")
+            return True
+        if result == "need_password":
+            set_pending_input(user_id, "userbot_password", {})
+            send_message(chat_id, "🔐 Bu akkountda 2 bosqichli tasdiqlash (2FA) yoqilgan — parolingizni yuboring:")
+            return True
+        phone = _userbot_finalize_login(user_id)
+        send_message(chat_id, f"✅ Akkount ulandi: {phone}\n\nEndi \"🗄 Backup (API orqali)\" bo'limidan "
+                               f"chatlar ro'yxatini ko'rishingiz mumkin.")
+        return True
+
+    if action == "userbot_password":
+        clear_pending_input(user_id)
+        if not is_admin(user_id):
+            return True
+        password = text
+        try:
+            run_userbot_coro(_userbot_sign_in_password(user_id, password))
+        except Exception as e:
+            log.exception("Userbot sign_in (password) xatosi: %s", e)
+            send_message(chat_id, f"❌ Parol noto'g'ri yoki xato: {e}\nQaytadan boshlang: /start")
+            return True
+        phone = _userbot_finalize_login(user_id)
+        send_message(chat_id, f"✅ Akkount ulandi: {phone}\n\nEndi \"🗄 Backup (API orqali)\" bo'limidan "
+                               f"chatlar ro'yxatini ko'rishingiz mumkin.")
         return True
 
     if action == "getpack":
@@ -5681,21 +5743,6 @@ def handle_business_message(msg, business_connection_id):
     is_owner = owner_id is not None and user_id == owner_id
     can_run_commands = is_owner or is_admin(user_id)
 
-    if owner_id:
-        backup_key = backup_source_key(chat_id, business_connection_id)
-        if not get_backup_source(backup_key):
-            auto = get_backup_business_auto(owner_id)
-            if auto.get("enabled"):
-                enable_backup_source(
-                    backup_key, owner_id, "private", chat_id,
-                    title=(requester_info if not is_owner else f"chat:{chat_id}"),
-                    business_connection_id=business_connection_id,
-                )
-                set_backup_delivery(backup_key, auto.get("delivery_mode", "zip_self"),
-                                     auto.get("delivery_target_chat_id"))
-        if get_backup_source(backup_key):
-            log_backup_message(backup_key, msg, business_connection_id=business_connection_id)
-
     if is_owner:
         # Egasi shu chatga o'zi yozdi (buyruq bo'lsa ham, oddiy javob bo'lsa ham) —
         # kutilayotgan kechiktirilgan avto-javob(lar) shundan keyin o'zini bekor qiladi.
@@ -5930,9 +5977,6 @@ def _webhook_impl():
     if channel_post:
         chat_id = channel_post["chat"]["id"]
         register_channel(channel_post["chat"])
-        backup_key = backup_source_key(chat_id)
-        if get_backup_source(backup_key):
-            log_backup_message(backup_key, channel_post)
         if bot_is_group_admin(chat_id):
             react_with_kind(chat_id, channel_post["message_id"], "channel")
         return {"ok": True}
@@ -6072,9 +6116,6 @@ def _webhook_impl():
 
     if is_group:
         register_group(msg["chat"])
-        backup_key = backup_source_key(chat_id)
-        if get_backup_source(backup_key):
-            log_backup_message(backup_key, msg)
         if is_admin(user_id):
             reaction_kind = "superadmin" if user_id == SUPERADMIN_ID else "admin"
             react_with_kind(chat_id, msg["message_id"], reaction_kind)
