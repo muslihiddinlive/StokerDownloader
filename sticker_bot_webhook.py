@@ -1334,8 +1334,11 @@ async def _get_authorized_client(admin_id):
         return None
     client = TelegramClient(
         StringSession(sess["session_string"]), int(sess["api_id"]), sess["api_hash"],
+        connection_retries=2, retry_delay=1, timeout=15,
     )
+    log.info("Userbot: ulanish boshlandi (saqlangan sessiya, admin=%s)...", admin_id)
     await client.connect()
+    log.info("Userbot: ulanish tugadi (saqlangan sessiya, admin=%s), connected=%s", admin_id, client.is_connected())
     if not await client.is_user_authorized():
         return None
     _userbot_clients[admin_id] = client
@@ -1346,8 +1349,19 @@ async def _userbot_send_code(admin_id, api_id, api_hash, phone):
     """Yangi (hali autentifikatsiya qilinmagan) client yaratadi va SMS/Telegram
     kod yuborishni so'raydi. Client _userbot_login_state ichida vaqtinchalik
     saqlanadi (keyingi qadam — kodni tasdiqlash — shu clientni ishlatadi)."""
-    client = TelegramClient(StringSession(), int(api_id), api_hash)
+    # connection_retries/timeout aniq belgilanadi: Telethon'ning standart
+    # xatti-harakati (bir nechta marta, uzoq kutish bilan qayta urinish)
+    # sekin/beqaror tarmoqda (masalan ba'zi hosting muhitlarida) juda
+    # uzoq (bir necha daqiqa) davom etishi mumkin. Bu yerda tezroq
+    # muvaffaqiyatsizlikka moslashtiramiz — foydalanuvchi tezroq aniq
+    # xato xabarini oladi, cheksiz "kutish" o'rniga.
+    client = TelegramClient(
+        StringSession(), int(api_id), api_hash,
+        connection_retries=2, retry_delay=1, timeout=15,
+    )
+    log.info("Userbot: ulanish boshlandi (yangi login, admin=%s)...", admin_id)
     await client.connect()
+    log.info("Userbot: ulanish tugadi (yangi login, admin=%s), connected=%s", admin_id, client.is_connected())
     sent = await client.send_code_request(phone)
     _userbot_login_state[admin_id] = {
         "client": client, "api_id": int(api_id), "api_hash": api_hash,
