@@ -1394,6 +1394,84 @@ def _userbot_finalize_login(admin_id):
     return st["phone"]
 
 
+# Telethon ulanishi (client.connect(), send_code_request va h.k.) tashqi
+# MTProto serverlariga tarmoq so'rovi qiladi va ba'zan sekin yoki hatto
+# osilib qolishi mumkin (masalan hosting muhitida tarmoq cheklovlari
+# bo'lsa). Buni to'g'ridan-to'g'ri webhook so'rovi ichida (Flask sinxron
+# thread) kutish — butun botni bloklab qo'yadi: shu payt boshqa hech
+# qanday xabar/reaksiya ishlanmaydi, va agar hosting "osilib qolgan"
+# so'rovni qayta ishga tushirsa, foydalanuvchi hech qanday javob
+# olmasdan qolib ketadi. Shu sabab bu uchta qadam alohida fon
+# threadida ishlaydi (run_safe_thread orqali) — foydalanuvchiga
+# darhol "kuting" xabari boradi, natija esa tayyor bo'lgach alohida
+# xabar bilan yuboriladi. Bundan tashqari run_userbot_coro'ga nisbatan
+# qisqaroq timeout beriladi, shunda haqiqatda osilib qolgan holatda
+# ham foydalanuvchi cheksiz kutib qolmaydi.
+_USERBOT_STEP_TIMEOUT = 45
+
+
+def _userbot_phone_step_bg(chat_id, user_id, api_id, api_hash, phone):
+    try:
+        run_userbot_coro(_userbot_send_code(user_id, api_id, api_hash, phone), timeout=_USERBOT_STEP_TIMEOUT)
+    except ApiIdInvalidError:
+        send_message(chat_id, "❌ API_ID/API_HASH noto'g'ri. Qaytadan boshlang: /start")
+        return
+    except PhoneNumberInvalidError:
+        send_message(chat_id, "❌ Telefon raqam formati noto'g'ri. Qaytadan boshlang: /start")
+        return
+    except FloodWaitError as e:
+        send_message(chat_id, f"⏳ Juda ko'p urinish, {e.seconds} soniyadan keyin qaytadan urinib ko'ring.")
+        return
+    except TimeoutError:
+        send_message(chat_id, "❌ Telegram serverlariga ulanish vaqti tugadi (tarmoq sekin bo'lishi mumkin). "
+                              "Qaytadan urinib ko'ring: /start")
+        return
+    except Exception as e:
+        log.exception("Userbot send_code xatosi: %s", e)
+        send_message(chat_id, f"❌ Xato: {e}\nQaytadan boshlang: /start")
+        return
+    set_pending_input(user_id, "userbot_code", {})
+    send_message(chat_id, "4/4 — Telegram sizga (shu botga emas, asosiy Telegram ilovangizga) "
+                           "yuborgan tasdiqlash kodini kiriting:")
+
+
+def _userbot_code_step_bg(chat_id, user_id, code):
+    try:
+        result = run_userbot_coro(_userbot_sign_in_code(user_id, code), timeout=_USERBOT_STEP_TIMEOUT)
+    except (PhoneCodeInvalidError, PhoneCodeExpiredError):
+        send_message(chat_id, "❌ Kod noto'g'ri yoki eskirgan. Qaytadan boshlang: /start")
+        return
+    except TimeoutError:
+        send_message(chat_id, "❌ Telegram serverlariga ulanish vaqti tugadi. Qaytadan urinib ko'ring: /start")
+        return
+    except Exception as e:
+        log.exception("Userbot sign_in (code) xatosi: %s", e)
+        send_message(chat_id, f"❌ Xato: {e}\nQaytadan boshlang: /start")
+        return
+    if result == "need_password":
+        set_pending_input(user_id, "userbot_password", {})
+        send_message(chat_id, "🔐 Bu akkountda 2 bosqichli tasdiqlash (2FA) yoqilgan — parolingizni yuboring:")
+        return
+    phone = _userbot_finalize_login(user_id)
+    send_message(chat_id, f"✅ Akkount ulandi: {phone}\n\nEndi \"🗄 Backup (API orqali)\" bo'limidan "
+                           f"chatlar ro'yxatini ko'rishingiz mumkin.")
+
+
+def _userbot_password_step_bg(chat_id, user_id, password):
+    try:
+        run_userbot_coro(_userbot_sign_in_password(user_id, password), timeout=_USERBOT_STEP_TIMEOUT)
+    except TimeoutError:
+        send_message(chat_id, "❌ Telegram serverlariga ulanish vaqti tugadi. Qaytadan urinib ko'ring: /start")
+        return
+    except Exception as e:
+        log.exception("Userbot sign_in (password) xatosi: %s", e)
+        send_message(chat_id, f"❌ Parol noto'g'ri yoki xato: {e}\nQaytadan boshlang: /start")
+        return
+    phone = _userbot_finalize_login(user_id)
+    send_message(chat_id, f"✅ Akkount ulandi: {phone}\n\nEndi \"🗄 Backup (API orqali)\" bo'limidan "
+                           f"chatlar ro'yxatini ko'rishingiz mumkin.")
+
+
 async def _userbot_list_dialogs(admin_id, limit=80):
     client = await _get_authorized_client(admin_id)
     if client is None:
@@ -5160,24 +5238,8 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         phone = text.strip()
         api_id = pending["data"].get("api_id")
         api_hash = pending["data"].get("api_hash")
-        try:
-            run_userbot_coro(_userbot_send_code(user_id, api_id, api_hash, phone))
-        except ApiIdInvalidError:
-            send_message(chat_id, "❌ API_ID/API_HASH noto'g'ri. Qaytadan boshlang: /start")
-            return True
-        except PhoneNumberInvalidError:
-            send_message(chat_id, "❌ Telefon raqam formati noto'g'ri. Qaytadan boshlang: /start")
-            return True
-        except FloodWaitError as e:
-            send_message(chat_id, f"⏳ Juda ko'p urinish, {e.seconds} soniyadan keyin qaytadan urinib ko'ring.")
-            return True
-        except Exception as e:
-            log.exception("Userbot send_code xatosi: %s", e)
-            send_message(chat_id, f"❌ Xato: {e}\nQaytadan boshlang: /start")
-            return True
-        set_pending_input(user_id, "userbot_code", {})
-        send_message(chat_id, "4/4 — Telegram sizga (shu botga emas, asosiy Telegram ilovangizga) "
-                               "yuborgan tasdiqlash kodini kiriting:")
+        send_message(chat_id, "⏳ Kod so'ralmoqda, biroz kuting...")
+        run_safe_thread(_userbot_phone_step_bg, chat_id, user_id, api_id, api_hash, phone, chat_id=chat_id)
         return True
 
     if action == "userbot_code":
@@ -5185,22 +5247,8 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         if not is_admin(user_id):
             return True
         code = text.strip()
-        try:
-            result = run_userbot_coro(_userbot_sign_in_code(user_id, code))
-        except (PhoneCodeInvalidError, PhoneCodeExpiredError):
-            send_message(chat_id, "❌ Kod noto'g'ri yoki eskirgan. Qaytadan boshlang: /start")
-            return True
-        except Exception as e:
-            log.exception("Userbot sign_in (code) xatosi: %s", e)
-            send_message(chat_id, f"❌ Xato: {e}\nQaytadan boshlang: /start")
-            return True
-        if result == "need_password":
-            set_pending_input(user_id, "userbot_password", {})
-            send_message(chat_id, "🔐 Bu akkountda 2 bosqichli tasdiqlash (2FA) yoqilgan — parolingizni yuboring:")
-            return True
-        phone = _userbot_finalize_login(user_id)
-        send_message(chat_id, f"✅ Akkount ulandi: {phone}\n\nEndi \"🗄 Backup (API orqali)\" bo'limidan "
-                               f"chatlar ro'yxatini ko'rishingiz mumkin.")
+        send_message(chat_id, "⏳ Tekshirilmoqda, biroz kuting...")
+        run_safe_thread(_userbot_code_step_bg, chat_id, user_id, code, chat_id=chat_id)
         return True
 
     if action == "userbot_password":
@@ -5208,15 +5256,8 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         if not is_admin(user_id):
             return True
         password = text
-        try:
-            run_userbot_coro(_userbot_sign_in_password(user_id, password))
-        except Exception as e:
-            log.exception("Userbot sign_in (password) xatosi: %s", e)
-            send_message(chat_id, f"❌ Parol noto'g'ri yoki xato: {e}\nQaytadan boshlang: /start")
-            return True
-        phone = _userbot_finalize_login(user_id)
-        send_message(chat_id, f"✅ Akkount ulandi: {phone}\n\nEndi \"🗄 Backup (API orqali)\" bo'limidan "
-                               f"chatlar ro'yxatini ko'rishingiz mumkin.")
+        send_message(chat_id, "⏳ Tekshirilmoqda, biroz kuting...")
+        run_safe_thread(_userbot_password_step_bg, chat_id, user_id, password, chat_id=chat_id)
         return True
 
     if action == "getpack":
