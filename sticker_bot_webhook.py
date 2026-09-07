@@ -457,9 +457,11 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
 
 
 def send_document_bytes(chat_id, filename, file_bytes, caption=None, business_connection_id=None,
-                         caption_entities=None, decoration_key=None):
+                         caption_entities=None, decoration_key=None, reply_to=None):
     files = {"document": (filename, file_bytes)}
     payload = {"chat_id": chat_id}
+    if reply_to:
+        payload["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
     if caption:
         send_caption, send_ents = caption, caption_entities
         if not caption_entities:
@@ -2134,6 +2136,39 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
         send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}", decoration_key="c5f48678c")
     if CACHE_GROUP_ID:
         send_document_bytes(CACHE_GROUP_ID, filename, content, caption=f"{requester_info} — {filename}", decoration_key="c5f48678c")
+
+
+def send_sticker_reply_by_index(chat_id, reply_to_message_id, pack_name, index):
+    """.reply <pack> <index> — guruh moderatorlari uchun: reply qilingan xabar
+    egasiga o'sha xabarga javoban shu pack'dagi index-inchi stikerni yuboradi.
+    .tgs'dan farqi: cheklovsiz (admin/superadmin/guruh egasi/admini uchun) va
+    natija reply qilingan xabarga bog'lanadi."""
+    run_safe_thread(
+        _send_sticker_reply_by_index_sync,
+        chat_id, reply_to_message_id, pack_name, index,
+        chat_id=chat_id, reply_to=reply_to_message_id,
+    )
+
+
+def _send_sticker_reply_by_index_sync(chat_id, reply_to_message_id, pack_name, index):
+    sticker_set = get_sticker_set(pack_name)
+    if not sticker_set:
+        send_message(chat_id, "Pack topilmadi. Nomini/havolani tekshiring.", reply_to=reply_to_message_id)
+        return
+    stickers = sticker_set.get("stickers", [])
+    if index < 1 or index > len(stickers):
+        send_message(chat_id, f"Bu pack'da {len(stickers)} ta element bor. 1 dan {len(stickers)} gacha raqam kiriting.",
+                      reply_to=reply_to_message_id)
+        return
+    sticker = stickers[index - 1]
+    file_path = get_file_path(sticker["file_id"])
+    if not file_path:
+        send_message(chat_id, "Faylni olishda xato yuz berdi.", reply_to=reply_to_message_id)
+        return
+    content = download_file_bytes(file_path)
+    ext = file_ext_for(sticker)
+    filename = f"{pack_name}_{index}{ext}"
+    send_document_bytes(chat_id, filename, content, reply_to=reply_to_message_id)
 
 
 def get_custom_emoji_set_name(custom_emoji_id):
@@ -6182,6 +6217,28 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         else:
             if not hush:
                 send_message(chat_id, "Chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+        return True
+
+    if stripped.startswith(".reply "):
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        if not reply:
+            send_message(chat_id, "Kimning xabariga stiker tashlamoqchi bo'lsangiz, o'sha xabarga reply qilib .reply yozing.")
+            return True
+        parts = stripped.split()
+        if len(parts) < 3:
+            send_message(chat_id, "Format: .reply <pack_manzili_yoki_nomi> <tartib_raqami> (xabarga reply qilib)")
+            return True
+        pack_name = resolve_pack_name_from_text(parts[1])
+        try:
+            index = int(parts[2])
+        except ValueError:
+            send_message(chat_id, "Tartib raqami butun son bo'lishi kerak.")
+            return True
+        if not pack_name:
+            send_message(chat_id, "Pack manzilini/nomini aniqlab bo'lmadi.")
+            return True
+        send_sticker_reply_by_index(chat_id, reply["message_id"], pack_name, index)
         return True
 
     if stripped.startswith(".mute"):
