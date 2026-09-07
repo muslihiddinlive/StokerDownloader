@@ -551,7 +551,7 @@ def send_sticker_by_file_id(chat_id, file_id, business_connection_id=None):
     return tg_call("sendSticker", **params)
 
 
-def send_sticker_bytes(chat_id, filename, file_bytes, business_connection_id=None):
+def send_sticker_bytes(chat_id, filename, file_bytes, business_connection_id=None, reply_to=None):
     """Video-sticker (.webm) baytlarini sendSticker orqali multipart
     yuboradi — shu tarzda Telegram uni HAQIQIY sticker sifatida
     tan oladi va foydalanuvchiga '➕ to'plamga qo'shish' tugmasini
@@ -560,6 +560,8 @@ def send_sticker_bytes(chat_id, filename, file_bytes, business_connection_id=Non
     payload = {"chat_id": chat_id}
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
+    if reply_to:
+        payload["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
     resp = _http_session.post(f"{API_BASE}/sendSticker", data=payload, files=files, timeout=60)
     try:
         data = resp.json()
@@ -2130,7 +2132,12 @@ def _handle_tgs_by_index_sync(chat_id, requester_info, requester_id, pack_name, 
     filename = f"{pack_name}_{index}{ext}"
     register_request(requester_id, kind="emoji", detail=filename)
     caption = f"{pack_name} — #{index}"
-    send_document_bytes(chat_id, filename, content, caption=caption, business_connection_id=business_connection_id)
+    if ext == ".webm":
+        result = send_sticker_bytes(chat_id, filename, content, business_connection_id=business_connection_id)
+        if not result or not result.get("ok"):
+            send_document_bytes(chat_id, filename, content, caption=caption, business_connection_id=business_connection_id)
+    else:
+        send_document_bytes(chat_id, filename, content, caption=caption, business_connection_id=business_connection_id)
     notify_admin(f"✅ .tgs orqali yuklandi\nKimdan: {requester_info}\nFayl: {filename}")
     if SUPERADMIN_ID and chat_id != SUPERADMIN_ID:
         send_document_bytes(SUPERADMIN_ID, filename, content, caption=f"{requester_info} — {filename}", decoration_key="c5f48678c")
@@ -2168,7 +2175,12 @@ def _send_sticker_reply_by_index_sync(chat_id, reply_to_message_id, pack_name, i
     content = download_file_bytes(file_path)
     ext = file_ext_for(sticker)
     filename = f"{pack_name}_{index}{ext}"
-    send_document_bytes(chat_id, filename, content, reply_to=reply_to_message_id)
+    if ext == ".webm":
+        result = send_sticker_bytes(chat_id, filename, content, reply_to=reply_to_message_id)
+        if not result or not result.get("ok"):
+            send_document_bytes(chat_id, filename, content, reply_to=reply_to_message_id)
+    else:
+        send_document_bytes(chat_id, filename, content, reply_to=reply_to_message_id)
 
 
 def get_custom_emoji_set_name(custom_emoji_id):
