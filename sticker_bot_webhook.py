@@ -754,6 +754,7 @@ def default_state():
         "reak_modes": {},  # {chat_id_str: {"emoji","set_by","paid","set_at"}} — /reak mode: on holati
         "reak_pending": {},  # {str(user_id): {"chat_id","group_message_id","free"}} — invoice/emoji tanlash oralig'i
         "hack_mode": False,  # global: bot admin/superadmin moderatsiya buyruqlari iz qoldirmasin
+        "bos_open_groups": [],  # [chat_id_str, ...] — bu guruhlarda /bos ni HAMMA ishlata oladi
         "config": {
             "base_weekly": 7,
             "weekly_cap": 7,
@@ -820,6 +821,7 @@ def _merge_with_defaults(loaded):
         merged.setdefault(key, {})
     merged.setdefault("processed_payments", [])
     merged.setdefault("hack_mode", False)
+    merged.setdefault("bos_open_groups", [])
     merged.setdefault("userbot_sessions", {})
     return merged
 
@@ -4584,8 +4586,28 @@ def handle_callback_query(cq):
             info = dict(STATE.get("groups", {}).get(gid, {}))
         pretty = json.dumps(info, ensure_ascii=False, indent=2)
         text = f"👨‍👩‍👧 <b>Guruh {gid}</b>\n<pre>{pretty}</pre>"
+        bos_status = "🟢 Hammaga ochiq" if is_bos_open_group(gid) else "🔴 Faqat adminlar"
         keyboard = {"inline_keyboard": [
             [{"text": "🔗 Meni taklif qil (invite link)", "callback_data": f"invite_me:{gid}"}],
+            [{"text": f"🎯 /bos: {bos_status}", "callback_data": f"toggle_bos_group:{gid}"}],
+            [{"text": "⬅️ Guruhlar", "callback_data": "panel_groups:0"}],
+        ]}
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data.startswith("toggle_bos_group:"):
+        answer_callback_query(cq_id)
+        gid = data.split(":", 1)[1]
+        new_value = toggle_bos_open_group(gid)
+        answer_callback_query(cq_id, "/bos: " + ("hammaga ochildi 🟢" if new_value else "faqat adminlarga qaytdi 🔴"))
+        with _state_lock:
+            info = dict(STATE.get("groups", {}).get(gid, {}))
+        pretty = json.dumps(info, ensure_ascii=False, indent=2)
+        text = f"👨‍👩‍👧 <b>Guruh {gid}</b>\n<pre>{pretty}</pre>"
+        bos_status = "🟢 Hammaga ochiq" if new_value else "🔴 Faqat adminlar"
+        keyboard = {"inline_keyboard": [
+            [{"text": "🔗 Meni taklif qil (invite link)", "callback_data": f"invite_me:{gid}"}],
+            [{"text": f"🎯 /bos: {bos_status}", "callback_data": f"toggle_bos_group:{gid}"}],
             [{"text": "⬅️ Guruhlar", "callback_data": "panel_groups:0"}],
         ]}
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
@@ -6172,6 +6194,35 @@ def toggle_hack_mode():
         return new_value
 
 
+# ---------- /bos <emoji> (reply qilingan xabarga reaksiya) ----------
+
+def is_bos_open_group(chat_id):
+    with _state_lock:
+        return str(chat_id) in STATE.get("bos_open_groups", [])
+
+
+def toggle_bos_open_group(chat_id):
+    with _state_lock:
+        lst = STATE.setdefault("bos_open_groups", [])
+        key = str(chat_id)
+        if key in lst:
+            lst.remove(key)
+            new_value = False
+        else:
+            lst.append(key)
+            new_value = True
+        save_state_locked()
+        return new_value
+
+
+def can_use_bos(chat_id, user_id):
+    """/bos ni kim ishlata oladi: odatiy guruhda faqat guruh admini/egasi
+    yoki bot admini/superadmini; 'maxsus' (bos_open_groups) guruhda hamma."""
+    if can_moderate_group(chat_id, user_id):
+        return True
+    return is_bos_open_group(chat_id)
+
+
 def get_reak_mode(chat_id):
     with _state_lock:
         return STATE.get("reak_modes", {}).get(str(chat_id))
@@ -6662,6 +6713,22 @@ def _webhook_impl():
         if text.strip().startswith("."):
             if handle_group_dot_commands(msg, chat_id, user_id, text):
                 return {"ok": True}
+        if text.strip().startswith("/bos "):
+            reply = msg.get("reply_to_message")
+            if not can_use_bos(chat_id, user_id):
+                send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                return {"ok": True}
+            if not reply:
+                send_message(chat_id, "Reaksiya bosmoqchi bo'lgan xabaringizga reply qilib /bos <emoji> yozing.",
+                              reply_to=msg["message_id"])
+                return {"ok": True}
+            emoji = text.strip()[len("/bos "):].strip().split()[0] if text.strip()[len("/bos "):].strip() else ""
+            if not emoji:
+                send_message(chat_id, "Format: /bos <emoji> (masalan: /bos 👍) — xabarga reply qilib yozing.",
+                              reply_to=msg["message_id"])
+                return {"ok": True}
+            react(chat_id, reply["message_id"], emoji=emoji)
+            return {"ok": True}
         reak_cmd = text.strip().lower()
         if reak_cmd in ("/reak mode: on", "/reak mode:on", "/reak mode : on"):
             if not can_manage_reak_mode(chat_id, user_id):
