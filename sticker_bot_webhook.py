@@ -4354,6 +4354,16 @@ def handle_callback_query(cq):
                            "✅ Reak mode (🌈 Random ijobiy) yoqildi: endi har bir yangi xabarga tasodifiy ijobiy emoji qo'yiladi.")
         return
 
+    if data == "groupwrite_start":
+        group_chat_id = chat_id  # callback query guruhda bosilgan, chat_id — o'sha guruh
+        if not can_moderate_group(group_chat_id, user_id):
+            answer_callback_query(cq_id, "DNX", show_alert=True)
+            return
+        answer_callback_query(cq_id, "Bot bilan shaxsiy chatga o'ting — u yerda matn so'raladi.", show_alert=True)
+        set_pending_input(user_id, "groupwrite_text", {"chat_id": group_chat_id})
+        send_message(user_id, f"💬 Guruhga yubormoqchi bo'lgan xabaringizni yozing:")
+        return
+
     if data.startswith("reak_pick:"):
         answer_callback_query(cq_id)
         emoji = data.split(":", 1)[1]
@@ -5512,6 +5522,19 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
                      reply_markup=back_to_panel_keyboard())
         return True
 
+    if action == "groupwrite_text":
+        clear_pending_input(user_id)
+        group_chat_id = (pending.get("data") or {}).get("chat_id")
+        if not group_chat_id:
+            send_message(chat_id, "❌ Guruh aniqlanmadi. Qaytadan guruhdagi tugmani bosing.")
+            return True
+        result = send_message(group_chat_id, text, entities=entities or None)
+        if result and result.get("ok"):
+            send_message(chat_id, "✅ Guruhga yuborildi.")
+        else:
+            send_message(chat_id, "❌ Yuborishda xato yuz berdi (bot guruhda admin emasligi mumkin).")
+        return True
+
     if action == "usearch_id_input":
         clear_pending_input(user_id)
         raw = text.strip()
@@ -6357,6 +6380,19 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             send_message(chat_id, "Pack manzilini/nomini aniqlab bo'lmadi.")
             return True
         send_sticker_reply_by_index(chat_id, reply["message_id"], pack_name, index)
+        return True
+
+    if stripped == ".yoz":
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        result = send_message(
+            chat_id,
+            "💬 Slow mode tufayli oddiy yozib bo'lmasa — quyidagi tugma orqali guruhga xabar yuboring:",
+            reply_markup={"inline_keyboard": [[{"text": "💬 Guruhga yozish", "callback_data": "groupwrite_start"}]]},
+        )
+        if result and result.get("ok"):
+            new_msg_id = result["result"]["message_id"]
+            tg_call("pinChatMessage", chat_id=chat_id, message_id=new_msg_id, disable_notification=True)
         return True
 
     if stripped.startswith(".mute"):
