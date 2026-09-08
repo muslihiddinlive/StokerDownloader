@@ -3522,6 +3522,7 @@ def admin_panel_keyboard(user_id):
             {"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"},
             {"text": "💬 Foydalanuvchiga yozish", "callback_data": "panel_dm_user"},
         ])
+        rows.append([{"text": "📢 Bot nomidan guruhga yozish", "callback_data": "panel_group_write:0"}])
         rows.append([
             {"text": "🛡 Adminlar", "callback_data": "panel_admins"},
             {"text": "⚡ Reaksiya emoji", "callback_data": "panel_reaction"},
@@ -3541,6 +3542,7 @@ def admin_panel_keyboard(user_id):
             {"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"},
         ])
         rows.append([{"text": "💬 Foydalanuvchiga yozish", "callback_data": "panel_dm_user"}])
+        rows.append([{"text": "📢 Bot nomidan guruhga yozish", "callback_data": "panel_group_write:0"}])
     rows.append([{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}])
     return {"inline_keyboard": rows}
 
@@ -4352,6 +4354,49 @@ def handle_callback_query(cq):
         set_reak_mode(target_chat_id, None, set_by=user_id, random_positive=True)
         safe_edit_or_send(chat_id, message_id,
                            "✅ Reak mode (🌈 Random ijobiy) yoqildi: endi har bir yangi xabarga tasodifiy ijobiy emoji qo'yiladi.")
+        return
+
+    if data.startswith("panel_group_write:"):
+        answer_callback_query(cq_id)
+        if not is_admin(user_id):
+            return
+        page = 0
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            page = 0
+        with _state_lock:
+            groups = dict(STATE.get("groups", {}))
+        items = [(gid, info.get("title", gid)) for gid, info in groups.items()]
+        if not items:
+            safe_edit_or_send(chat_id, message_id, "Hozircha ro'yxatda guruh yo'q.",
+                               reply_markup=back_to_panel_keyboard())
+            return
+        start = page * PAGE_SIZE
+        chunk = items[start:start + PAGE_SIZE]
+        rows = [[{"text": title, "callback_data": f"groupwrite_pick:{gid}"}] for gid, title in chunk]
+        nav = []
+        if page > 0:
+            nav.append({"text": "⬅️", "callback_data": f"panel_group_write:{page - 1}"})
+        if start + PAGE_SIZE < len(items):
+            nav.append({"text": "➡️", "callback_data": f"panel_group_write:{page + 1}"})
+        if nav:
+            rows.append(nav)
+        rows.append([{"text": "⬅️ Admin panel", "callback_data": "menu_admin_panel"}])
+        safe_edit_or_send(chat_id, message_id, f"📢 Qaysi guruhga yozmoqchisiz? ({len(items)} guruh)",
+                           reply_markup={"inline_keyboard": rows})
+        return
+
+    if data.startswith("groupwrite_pick:"):
+        answer_callback_query(cq_id)
+        if not is_admin(user_id):
+            return
+        gid = data.split(":", 1)[1]
+        with _state_lock:
+            title = STATE.get("groups", {}).get(gid, {}).get("title", gid)
+        set_pending_input(user_id, "groupwrite_text", {"chat_id": int(gid)})
+        safe_edit_or_send(chat_id, message_id, f"📢 «{title}» guruhiga yuboriladigan xabarni yozing:",
+                           reply_markup=back_to_panel_keyboard())
         return
 
     if data == "groupwrite_start":
