@@ -755,6 +755,8 @@ def default_state():
         "reak_pending": {},  # {str(user_id): {"chat_id","group_message_id","free"}} — invoice/emoji tanlash oralig'i
         "hack_mode": False,  # global: bot admin/superadmin moderatsiya buyruqlari iz qoldirmasin
         "bos_open_groups": [],  # [chat_id_str, ...] — bu guruhlarda /bos ni HAMMA ishlata oladi
+        "reply_open_groups": [],  # [chat_id_str, ...] — .replymode on: bu guruhlarda .reply ni HAMMA ishlata oladi
+        "tgs_open_groups": [],  # [chat_id_str, ...] — .tgsmode on: bu guruhlarda .tgs ni HAMMA ishlata oladi
         "config": {
             "base_weekly": 7,
             "weekly_cap": 7,
@@ -822,6 +824,8 @@ def _merge_with_defaults(loaded):
     merged.setdefault("processed_payments", [])
     merged.setdefault("hack_mode", False)
     merged.setdefault("bos_open_groups", [])
+    merged.setdefault("reply_open_groups", [])
+    merged.setdefault("tgs_open_groups", [])
     merged.setdefault("userbot_sessions", {})
     return merged
 
@@ -6291,6 +6295,65 @@ def can_use_bos(chat_id, user_id):
     return is_bos_open_group(chat_id)
 
 
+# ---------- .replymode / .tgsmode — .reply va .tgs'ni oddiy userlarga ochish ----------
+
+def _is_open_group(state_key, chat_id):
+    with _state_lock:
+        return str(chat_id) in STATE.get(state_key, [])
+
+
+def _set_open_group(state_key, chat_id, value):
+    with _state_lock:
+        lst = STATE.setdefault(state_key, [])
+        key = str(chat_id)
+        if value and key not in lst:
+            lst.append(key)
+        elif not value and key in lst:
+            lst.remove(key)
+        save_state_locked()
+
+
+def is_reply_open_group(chat_id):
+    return _is_open_group("reply_open_groups", chat_id)
+
+
+def is_tgs_open_group(chat_id):
+    return _is_open_group("tgs_open_groups", chat_id)
+
+
+def can_use_reply_cmd(chat_id, user_id):
+    """.reply <pack> <index>'ni kim ishlata oladi: odatiy holda faqat
+    moderatorlar; .replymode on qilingan guruhda — hamma."""
+    if can_moderate_group(chat_id, user_id):
+        return True
+    return is_reply_open_group(chat_id)
+
+
+def can_use_tgs_cmd(chat_id, user_id):
+    """.tgs <pack> <index>'ni kim ishlata oladi: odatiy holda hammaga ochiq
+    emas (kunlik limit bilan cheklangan oddiy funksiya bo'lgani uchun bu
+    yerda faqat .tgsmode holatini nazorat qilamiz — chaqiruvchi tomon
+    kunlik limitni alohida tekshiradi)."""
+    if can_moderate_group(chat_id, user_id):
+        return True
+    return is_tgs_open_group(chat_id)
+
+
+_MODE_COMMAND_RE = re.compile(
+    r"^[./]?\s*(reak|reply|tgs)\s*mode\s*:?\s*(on|off)$", re.IGNORECASE
+)
+
+
+def parse_mode_command(text):
+    """'.reakmode on', '.reak mode: on', 'reakmode on', '.reply mode off' —
+    barchasini bir xil formatda taniydi. Qaytaradi: (mode_name, 'on'/'off') yoki None.
+    mode_name: 'reak' | 'reply' | 'tgs'."""
+    m = _MODE_COMMAND_RE.match(text.strip())
+    if not m:
+        return None
+    return m.group(1).lower(), m.group(2).lower()
+
+
 def get_reak_mode(chat_id):
     with _state_lock:
         return STATE.get("reak_modes", {}).get(str(chat_id))
@@ -6406,7 +6469,7 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         return True
 
     if stripped.startswith(".reply "):
-        if not can_moderate_group(chat_id, user_id):
+        if not can_use_reply_cmd(chat_id, user_id):
             return True
         if not reply:
             send_message(chat_id, "Kimning xabariga stiker tashlamoqchi bo'lsangiz, o'sha xabarga reply qilib .reply yozing.")
@@ -6495,7 +6558,7 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         return True
 
     if stripped.startswith(".tgs "):
-        if not is_admin(user_id):
+        if not can_use_tgs_cmd(chat_id, user_id):
             return True
         parts = stripped.split()
         if len(parts) < 3:
@@ -6821,32 +6884,51 @@ def _webhook_impl():
                     send_message(chat_id, f"❌ Reaksiya qo'yilmadi. Xato: {err_desc or 'nomaʼlum'}",
                                   reply_to=msg["message_id"])
             return {"ok": True}
-        reak_cmd = text.strip().lower()
-        if reak_cmd in ("/reak mode: on", "/reak mode:on", "/reak mode : on"):
-            if not can_manage_reak_mode(chat_id, user_id):
-                send_message(chat_id, "DNX", reply_to=msg["message_id"])
+        mode_cmd = parse_mode_command(text)
+        if mode_cmd:
+            mode_name, on_off = mode_cmd
+            if mode_name == "reak":
+                if on_off == "on":
+                    if not can_manage_reak_mode(chat_id, user_id):
+                        send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                        return {"ok": True}
+                    if is_admin(user_id):
+                        set_pending_input(user_id, "reak_pick_emoji", {"chat_id": chat_id, "free": True})
+                        send_message(chat_id, "✅ To'lovsiz (bot admini). Qaysi reaksiya bo'lsin?",
+                                     reply_markup=reak_emoji_pick_keyboard())
+                        return {"ok": True}
+                    result = tg_call(
+                        "sendInvoice", chat_id=chat_id, title="Reak mode — avtomatik reaksiya",
+                        description="Guruhdagi barcha xabarlarga avtomatik reaksiya qo'yish xizmati.",
+                        payload=f"reak_mode:{user_id}:{chat_id}", provider_token="", currency="XTR",
+                        prices=[{"label": "Reak mode (5 Stars)", "amount": 5}],
+                    )
+                    if not result or not result.get("ok"):
+                        send_message(chat_id, "⚠️ To'lov havolasini yaratishda xato yuz berdi.")
+                    return {"ok": True}
+                else:
+                    if not can_disable_reak_mode(chat_id, user_id):
+                        send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                        return {"ok": True}
+                    clear_reak_mode(chat_id)
+                    send_message(chat_id, "🛑 Reak mode o'chirildi.")
+                    return {"ok": True}
+            elif mode_name == "reply":
+                if not can_moderate_group(chat_id, user_id):
+                    send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                    return {"ok": True}
+                _set_open_group("reply_open_groups", chat_id, on_off == "on")
+                send_message(chat_id, "✅ .reply endi hammaga ochiq." if on_off == "on"
+                                       else "🛑 .reply endi faqat moderatorlarga ochiq.")
                 return {"ok": True}
-            if is_admin(user_id):
-                set_pending_input(user_id, "reak_pick_emoji", {"chat_id": chat_id, "free": True})
-                send_message(chat_id, "✅ To'lovsiz (bot admini). Qaysi reaksiya bo'lsin?",
-                             reply_markup=reak_emoji_pick_keyboard())
+            elif mode_name == "tgs":
+                if not can_moderate_group(chat_id, user_id):
+                    send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                    return {"ok": True}
+                _set_open_group("tgs_open_groups", chat_id, on_off == "on")
+                send_message(chat_id, "✅ .tgs endi hammaga ochiq." if on_off == "on"
+                                       else "🛑 .tgs endi faqat moderatorlarga ochiq.")
                 return {"ok": True}
-            result = tg_call(
-                "sendInvoice", chat_id=chat_id, title="Reak mode — avtomatik reaksiya",
-                description="Guruhdagi barcha xabarlarga avtomatik reaksiya qo'yish xizmati.",
-                payload=f"reak_mode:{user_id}:{chat_id}", provider_token="", currency="XTR",
-                prices=[{"label": "Reak mode (5 Stars)", "amount": 5}],
-            )
-            if not result or not result.get("ok"):
-                send_message(chat_id, "⚠️ To'lov havolasini yaratishda xato yuz berdi.")
-            return {"ok": True}
-        if reak_cmd in ("/reak mode: off", "/reak mode:off", "/reak mode : off"):
-            if not can_disable_reak_mode(chat_id, user_id):
-                send_message(chat_id, "DNX", reply_to=msg["message_id"])
-                return {"ok": True}
-            clear_reak_mode(chat_id)
-            send_message(chat_id, "🛑 Reak mode o'chirildi.")
-            return {"ok": True}
         mode = get_reak_mode(chat_id)
         if mode and not is_admin(user_id):
             if mode.get("random_positive"):
