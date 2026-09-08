@@ -6241,10 +6241,10 @@ def can_manage_reak_mode(chat_id, user_id):
 
 
 def can_disable_reak_mode(chat_id, user_id):
-    """/reak mode: off ni faqat bot superadmini/admini yoki guruh egasi qila oladi."""
+    """/reak mode: off ni bot superadmini/admini, guruh egasi yoki guruh admini qila oladi."""
     if is_admin(user_id):
         return True
-    return is_group_owner(chat_id, user_id)
+    return is_group_admin_or_owner(chat_id, user_id)
 
 
 # ---------- Hack mode (superadmin panelidan yoqib-o'chiriladi) ----------
