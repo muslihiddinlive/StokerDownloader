@@ -6727,7 +6727,18 @@ def _webhook_impl():
                 send_message(chat_id, "Format: /bos <emoji> (masalan: /bos 👍) — xabarga reply qilib yozing.",
                               reply_to=msg["message_id"])
                 return {"ok": True}
-            react(chat_id, reply["message_id"], emoji=emoji)
+            result = react(chat_id, reply["message_id"], emoji=emoji)
+            if not result or not result.get("ok"):
+                err_desc = (result or {}).get("description", "") if isinstance(result, dict) else ""
+                if "REACTION_INVALID" in err_desc or "REACTION_EMPTY" in err_desc:
+                    send_message(chat_id, f"❌ '{emoji}' — bu emoji reaksiya sifatida qo'llab-quvvatlanmaydi.",
+                                  reply_to=msg["message_id"])
+                elif "MESSAGE_ID_INVALID" in err_desc or "MESSAGE_NOT_FOUND" in err_desc:
+                    send_message(chat_id, "❌ Bu xabarga reaksiya qo'yib bo'lmadi (juda eski xabar bo'lishi mumkin).",
+                                  reply_to=msg["message_id"])
+                else:
+                    send_message(chat_id, f"❌ Reaksiya qo'yilmadi. Xato: {err_desc or 'nomaʼlum'}",
+                                  reply_to=msg["message_id"])
             return {"ok": True}
         reak_cmd = text.strip().lower()
         if reak_cmd in ("/reak mode: on", "/reak mode:on", "/reak mode : on"):
