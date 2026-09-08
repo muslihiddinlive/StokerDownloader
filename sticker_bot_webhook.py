@@ -3866,14 +3866,14 @@ def handle_callback_query(cq):
             (d["id"], (("👥 " if d["is_group"] else "📢 " if d["is_channel"] else "👤 ") + d["title"]))
             for d in dialogs
         ]
-        PAGE_SIZE = 8
-        start_idx = page * PAGE_SIZE
+        DIALOG_PAGE_SIZE = 8
+        start_idx = page * DIALOG_PAGE_SIZE
         rows = [[{"text": label[:60], "callback_data": f"userbot_pick:{did}"}]
-                for did, label in items[start_idx:start_idx + PAGE_SIZE]]
+                for did, label in items[start_idx:start_idx + DIALOG_PAGE_SIZE]]
         nav = []
         if page > 0:
             nav.append({"text": "⬅️", "callback_data": f"userbot_dialogs:{page - 1}"})
-        if start_idx + PAGE_SIZE < len(items):
+        if start_idx + DIALOG_PAGE_SIZE < len(items):
             nav.append({"text": "➡️", "callback_data": f"userbot_dialogs:{page + 1}"})
         if nav:
             rows.append(nav)
