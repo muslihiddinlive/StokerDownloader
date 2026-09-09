@@ -757,6 +757,7 @@ def default_state():
         "bos_open_groups": [],  # [chat_id_str, ...] — bu guruhlarda /bos ni HAMMA ishlata oladi
         "reply_open_groups": [],  # [chat_id_str, ...] — .replymode on: bu guruhlarda .reply ni HAMMA ishlata oladi
         "tgs_open_groups": [],  # [chat_id_str, ...] — .tgsmode on: bu guruhlarda .tgs ni HAMMA ishlata oladi
+        "last_broadcast_unreachable": [],  # [user_id_str, ...] — oxirgi broadcast'da yetib bormagan/bloklagan userlar
         "config": {
             "base_weekly": 7,
             "weekly_cap": 7,
@@ -826,6 +827,7 @@ def _merge_with_defaults(loaded):
     merged.setdefault("bos_open_groups", [])
     merged.setdefault("reply_open_groups", [])
     merged.setdefault("tgs_open_groups", [])
+    merged.setdefault("last_broadcast_unreachable", [])
     merged.setdefault("userbot_sessions", {})
     return merged
 
@@ -4448,6 +4450,24 @@ def handle_callback_query(cq):
         safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard(user_id))
         return
 
+    if data == "remove_unreachable_users":
+        answer_callback_query(cq_id)
+        with _state_lock:
+            unreachable = list(STATE.get("last_broadcast_unreachable", []))
+        if not unreachable:
+            safe_edit_or_send(chat_id, message_id, "Ro'yxat bo'sh — olib tashlanadigan user yo'q.",
+                               reply_markup=back_to_panel_keyboard())
+            return
+        with _state_lock:
+            STATE["known_users"] = [u for u in STATE["known_users"] if u not in unreachable]
+            for uid in unreachable:
+                STATE.get("users", {}).pop(str(uid), None)
+            STATE["last_broadcast_unreachable"] = []
+            save_state_locked()
+        safe_edit_or_send(chat_id, message_id, f"✅ {len(unreachable)} ta user ro'yxatdan olib tashlandi.",
+                           reply_markup=back_to_panel_keyboard())
+        return
+
     if data.startswith("panel_users:"):
         answer_callback_query(cq_id)
         page = int(data.split(":", 1)[1])
@@ -5818,11 +5838,35 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         with _state_lock:
             uids = list(STATE["known_users"])
         sent = 0
+        unreachable = []
         for uid in uids:
             r = send_message(uid, text)
-            if r.get("ok"):
+            if r and r.get("ok"):
                 sent += 1
-        send_message(chat_id, f"📣 Xabar {sent} ta foydalanuvchiga yuborildi.", decoration_key="m3649b7e8", reply_markup=back_to_panel_keyboard())
+            else:
+                desc = (r or {}).get("description", "") if isinstance(r, dict) else ""
+                # Faqat "bot bloklangan" / "chat topilmadi" kabi doimiy xatolarni
+                # hisobga olamiz — vaqtinchalik tarmoq xatolarini emas (ular
+                # keyingi safar tuzalishi mumkin, foydalanuvchini bekorga
+                # ro'yxatdan chiqarib yubormaslik uchun).
+                if any(marker in desc for marker in ("bot was blocked", "user is deactivated",
+                                                       "chat not found", "USER_DEACTIVATED",
+                                                       "PEER_ID_INVALID")):
+                    unreachable.append(uid)
+        with _state_lock:
+            STATE["last_broadcast_unreachable"] = unreachable
+            save_state_locked()
+        summary = f"📣 Xabar {sent} ta foydalanuvchiga yuborildi."
+        keyboard = back_to_panel_keyboard()
+        if unreachable:
+            summary += (f"\n\n⚠️ {len(unreachable)} ta foydalanuvchiga yetib bormadi "
+                        f"(botni bloklagan yoki hisobi o'chirilgan bo'lishi mumkin).")
+            keyboard = {"inline_keyboard": [
+                [{"text": f"🗑 {len(unreachable)} ta userni ro'yxatdan olib tashlash",
+                  "callback_data": "remove_unreachable_users"}],
+                [{"text": "⬅️ Panel", "callback_data": "menu_admin_panel"}],
+            ]}
+        send_message(chat_id, summary, decoration_key="m3649b7e8", reply_markup=keyboard)
         return True
 
     log.warning("handle_pending_input: HECH BIR action mos kelmadi (fallback) — action=%r user=%s", action, user_id)
