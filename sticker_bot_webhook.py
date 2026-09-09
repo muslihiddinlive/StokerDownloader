@@ -692,25 +692,67 @@ def can_moderate_group(chat_id, user_id):
     return is_group_admin_or_owner(chat_id, user_id)
 
 
-_DURATION_UNITS = ("soniya", "daqiqa", "soat", "kun", "oy")
-_DURATION_SECONDS = (1, 60, 3600, 86400, 2592000)  # oy ~ 30 kun
+_DURATION_UNIT_SECONDS = {
+    "s": 1, "soniya": 1,
+    "m": 60, "daqiqa": 60, "min": 60,
+    "h": 3600, "soat": 3600,
+    "k": 86400, "kun": 86400,
+    "o": 2592000, "oy": 2592000,
+    "y": 31536000, "yil": 31536000,
+}
+
+_MUTE_DURATION_RE = re.compile(r"^(\d+)\s*([a-zA-Zʻʼ']+)$")
+
+
+def parse_duration_token(token):
+    """'1h', '1 h', '5m', '2kun', '3yil' kabi bitta son+birlik ifodasini
+    soniyaga aylantiradi. Noto'g'ri/notanish birlik bo'lsa None qaytaradi."""
+    m = _MUTE_DURATION_RE.match(token.strip())
+    if not m:
+        return None
+    n, unit = m.group(1), m.group(2).lower()
+    mult = _DURATION_UNIT_SECONDS.get(unit)
+    if mult is None:
+        return None
+    try:
+        n = int(n)
+    except ValueError:
+        return None
+    if n <= 0:
+        return None
+    return n * mult
+
+
+def parse_mute_args(rest):
+    """.mute buyrug'idan keyingi qismni tahlil qiladi:
+    '1h', '1 h', '@user 1h sababi', '1h sababi', reply bilan '1h sababi' va h.k.
+    Qaytaradi: (duration_seconds, target_token_or_None, reason_or_None) yoki
+    None (format tushunarsiz bo'lsa).
+    Qidiruv tartibi: tokenlar orasida bitta son+birlik ifodasi (masalan '1h'
+    yoki '1'+'h' ketma-ket) topiladi — undan oldingi token(lar) nishon
+    (agar bo'lsa), keyingi qolgan matn sabab hisoblanadi."""
+    tokens = rest.strip().split()
+    if not tokens:
+        return None
+    for i, tok in enumerate(tokens):
+        # Bitta so'zli holat: "1h", "5m"
+        dur = parse_duration_token(tok)
+        consumed = 1
+        if dur is None and tok.isdigit() and i + 1 < len(tokens):
+            # Ikki so'zli holat: "1" "h"
+            dur = parse_duration_token(tok + tokens[i + 1])
+            consumed = 2
+        if dur is not None:
+            target_token = " ".join(tokens[:i]) if i > 0 else None
+            reason_tokens = tokens[i + consumed:]
+            reason = " ".join(reason_tokens) if reason_tokens else None
+            return dur, target_token, reason
+    return None
 
 
 def parse_mute_duration(parts):
-    """[soniya, daqiqa, soat, kun, oy] tartibidagi 5 ta sonni umumiy soniyaga aylantiradi.
-    Noto'g'ri format bo'lsa None qaytaradi."""
-    if len(parts) != 5:
-        return None
-    total = 0
-    for value, mult in zip(parts, _DURATION_SECONDS):
-        try:
-            n = int(value)
-        except ValueError:
-            return None
-        if n < 0:
-            return None
-        total += n * mult
-    return total if total > 0 else None
+    """Eskirgan (endi ishlatilmaydi) — orqaga moslik uchun saqlangan."""
+    return None
 
 
 def resolve_target_user(chat_id, reply, args_text):
@@ -739,6 +781,38 @@ def resolve_target_user(chat_id, reply, args_text):
         if (rec.get("username") or "").lower() == uname:
             return uid, user_label(uid)
     return None, f"@{uname} — botga tanish emas (u bot bilan hech gaplashmagan bo'lishi mumkin)."
+
+
+def extract_reason_after_target(args_text, reply):
+    """.ban/.unban/.kick/.unmute uchun: nishondan keyingi qolgan matnni sabab
+    sifatida qaytaradi. Reply orqali nishonlangan bo'lsa — butun args_text
+    sabab hisoblanadi (chunki u yerda nishon uchun token ishlatilmagan)."""
+    text = (args_text or "").strip()
+    if not text:
+        return None
+    if reply and reply.get("from"):
+        return text
+    # Birinchi token — nishon (username/ID), qolgani sabab.
+    parts = text.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+
+
+def format_duration_human(seconds):
+    """Soniyani o'qilishi qulay ko'rinishga o'giradi: '1 soat', '2 kun 3 soat' va h.k."""
+    units = [
+        ("yil", 31536000), ("oy", 2592000), ("kun", 86400),
+        ("soat", 3600), ("daqiqa", 60), ("soniya", 1),
+    ]
+    parts = []
+    remaining = seconds
+    for name, size in units:
+        if remaining >= size:
+            count = remaining // size
+            remaining -= count * size
+            parts.append(f"{count} {name}")
+        if len(parts) >= 2:
+            break
+    return " ".join(parts) if parts else f"{seconds} soniya"
 
 
 # ---------- DB (Telegram guruh + pinned xabar orqali) ----------
@@ -6479,13 +6553,17 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if target_id is None:
             send_message(chat_id, label_or_err)
             return True
+        reason = extract_reason_after_target(args_text, reply)
         result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
         hush = is_admin(user_id) and is_hack_mode_on()
         if result and result.get("ok"):
             if hush:
                 delete_message(chat_id, msg["message_id"])
             else:
-                send_message(chat_id, f"🚫 {label_or_err} guruhdan ban qilindi.")
+                text_out = f"🚫 {label_or_err} guruhdan ban qilindi."
+                if reason:
+                    text_out += f"\nSabab: {reason}"
+                send_message(chat_id, text_out)
         else:
             if not hush:
                 send_message(chat_id, "Ban qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
@@ -6499,13 +6577,17 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if target_id is None:
             send_message(chat_id, label_or_err)
             return True
+        reason = extract_reason_after_target(args_text, reply)
         result = tg_call("unbanChatMember", chat_id=chat_id, user_id=target_id, only_if_banned=True)
         hush = is_admin(user_id) and is_hack_mode_on()
         if result and result.get("ok"):
             if hush:
                 delete_message(chat_id, msg["message_id"])
             else:
-                send_message(chat_id, f"✅ {label_or_err} ban'dan chiqarildi.")
+                text_out = f"✅ {label_or_err} ban'dan chiqarildi."
+                if reason:
+                    text_out += f"\nSabab: {reason}"
+                send_message(chat_id, text_out)
         else:
             if not hush:
                 send_message(chat_id, "Ban'dan chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
@@ -6519,6 +6601,7 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if target_id is None:
             send_message(chat_id, label_or_err)
             return True
+        reason = extract_reason_after_target(args_text, reply)
         ban_result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
         hush = is_admin(user_id) and is_hack_mode_on()
         if ban_result and ban_result.get("ok"):
@@ -6526,7 +6609,10 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             if hush:
                 delete_message(chat_id, msg["message_id"])
             else:
-                send_message(chat_id, f"👢 {label_or_err} guruhdan chiqarildi (qaytib kira oladi).")
+                text_out = f"👢 {label_or_err} guruhdan chiqarildi (qaytib kira oladi)."
+                if reason:
+                    text_out += f"\nSabab: {reason}"
+                send_message(chat_id, text_out)
         else:
             if not hush:
                 send_message(chat_id, "Chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
@@ -6571,15 +6657,13 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if not can_moderate_group(chat_id, user_id):
             return True
         rest = stripped[len(".mute"):].strip()
-        parts = rest.split()
-        # Oxirgi 5 ta token vaqt sifatida ishlatiladi (qolgani username/ID bo'lishi mumkin)
-        duration_parts = parts[-5:] if len(parts) >= 5 else parts
-        args_text = " ".join(parts[:-5]) if len(parts) > 5 else ""
-        seconds = parse_mute_duration(duration_parts)
-        if seconds is None:
-            send_message(chat_id, "Format: .mute soniya daqiqa soat kun oy (masalan: .mute 1 21 2 2 3)")
+        parsed = parse_mute_args(rest)
+        if parsed is None:
+            send_message(chat_id, "Format: .mute <son><birlik> [sabab] (masalan: .mute 1h so'kindi, .mute 30m, .mute 2 kun)\n"
+                                   "Birliklar: s(soniya) m(daqiqa) h/soat k(kun) o/oy y/yil")
             return True
-        target_id, label_or_err = resolve_target_user(chat_id, reply, args_text)
+        seconds, target_token, reason = parsed
+        target_id, label_or_err = resolve_target_user(chat_id, reply, target_token or "")
         if target_id is None:
             send_message(chat_id, label_or_err)
             return True
@@ -6596,8 +6680,10 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             if hush:
                 delete_message(chat_id, msg["message_id"])
             else:
-                d, h, mi, s_, mo = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60, seconds % 60, 0
-                send_message(chat_id, f"🔇 {label_or_err} {seconds} soniyaga (~{d}k {h}s {mi}d {s_}soniya) mute qilindi.")
+                text_out = f"🔇 {label_or_err} {format_duration_human(seconds)}ga mute qilindi."
+                if reason:
+                    text_out += f"\nSabab: {reason}"
+                send_message(chat_id, text_out)
         else:
             if not hush:
                 send_message(chat_id, "Mute qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
@@ -6611,6 +6697,7 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if target_id is None:
             send_message(chat_id, label_or_err)
             return True
+        reason = extract_reason_after_target(args_text, reply)
         result = tg_call(
             "restrictChatMember", chat_id=chat_id, user_id=target_id, until_date=0,
             permissions={"can_send_messages": True, "can_send_audios": True, "can_send_documents": True,
@@ -6623,7 +6710,10 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             if hush:
                 delete_message(chat_id, msg["message_id"])
             else:
-                send_message(chat_id, f"🔊 {label_or_err} mute'dan chiqarildi.")
+                text_out = f"🔊 {label_or_err} mute'dan chiqarildi."
+                if reason:
+                    text_out += f"\nSabab: {reason}"
+                send_message(chat_id, text_out)
         else:
             if not hush:
                 send_message(chat_id, "Mute'dan chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
