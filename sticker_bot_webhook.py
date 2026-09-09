@@ -6491,6 +6491,26 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
                 send_message(chat_id, "Ban qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
         return True
 
+    if stripped == ".unban" or stripped.startswith(".unban "):
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        args_text = stripped[len(".unban"):].strip()
+        target_id, label_or_err = resolve_target_user(chat_id, reply, args_text)
+        if target_id is None:
+            send_message(chat_id, label_or_err)
+            return True
+        result = tg_call("unbanChatMember", chat_id=chat_id, user_id=target_id, only_if_banned=True)
+        hush = is_admin(user_id) and is_hack_mode_on()
+        if result and result.get("ok"):
+            if hush:
+                delete_message(chat_id, msg["message_id"])
+            else:
+                send_message(chat_id, f"✅ {label_or_err} ban'dan chiqarildi.")
+        else:
+            if not hush:
+                send_message(chat_id, "Ban'dan chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+        return True
+
     if stripped == ".kick" or stripped.startswith(".kick "):
         if not can_moderate_group(chat_id, user_id):
             return True
@@ -6581,6 +6601,32 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         else:
             if not hush:
                 send_message(chat_id, "Mute qilishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
+        return True
+
+    if stripped == ".unmute" or stripped.startswith(".unmute "):
+        if not can_moderate_group(chat_id, user_id):
+            return True
+        args_text = stripped[len(".unmute"):].strip()
+        target_id, label_or_err = resolve_target_user(chat_id, reply, args_text)
+        if target_id is None:
+            send_message(chat_id, label_or_err)
+            return True
+        result = tg_call(
+            "restrictChatMember", chat_id=chat_id, user_id=target_id, until_date=0,
+            permissions={"can_send_messages": True, "can_send_audios": True, "can_send_documents": True,
+                         "can_send_photos": True, "can_send_videos": True, "can_send_video_notes": True,
+                         "can_send_voice_notes": True, "can_send_polls": True, "can_send_other_messages": True,
+                         "can_add_web_page_previews": True},
+        )
+        hush = is_admin(user_id) and is_hack_mode_on()
+        if result and result.get("ok"):
+            if hush:
+                delete_message(chat_id, msg["message_id"])
+            else:
+                send_message(chat_id, f"🔊 {label_or_err} mute'dan chiqarildi.")
+        else:
+            if not hush:
+                send_message(chat_id, "Mute'dan chiqarishda xato (bot admin emasmi yoki huquqi yetarli emasmi tekshiring).")
         return True
 
     if stripped == ".zipstiker":
