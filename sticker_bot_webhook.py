@@ -6473,14 +6473,14 @@ def can_use_tgs_cmd(chat_id, user_id):
 
 
 _MODE_COMMAND_RE = re.compile(
-    r"^[./]?\s*(reak|reply|tgs)\s*mode\s*:?\s*(on|off)$", re.IGNORECASE
+    r"^[./]?\s*(reak|reply|tgs|bos)\s*mode\s*:?\s*(on|off)$", re.IGNORECASE
 )
 
 
 def parse_mode_command(text):
     """'.reakmode on', '.reak mode: on', 'reakmode on', '.reply mode off' —
     barchasini bir xil formatda taniydi. Qaytaradi: (mode_name, 'on'/'off') yoki None.
-    mode_name: 'reak' | 'reply' | 'tgs'."""
+    mode_name: 'reak' | 'reply' | 'tgs' | 'bos'."""
     m = _MODE_COMMAND_RE.match(text.strip())
     if not m:
         return None
@@ -7119,6 +7119,14 @@ def _webhook_impl():
                 _set_open_group("tgs_open_groups", chat_id, on_off == "on")
                 send_message(chat_id, "✅ .tgs endi hammaga ochiq." if on_off == "on"
                                        else "🛑 .tgs endi faqat moderatorlarga ochiq.")
+                return {"ok": True}
+            elif mode_name == "bos":
+                if not can_moderate_group(chat_id, user_id):
+                    send_message(chat_id, "DNX", reply_to=msg["message_id"])
+                    return {"ok": True}
+                _set_open_group("bos_open_groups", chat_id, on_off == "on")
+                send_message(chat_id, "✅ /bos endi hammaga ochiq." if on_off == "on"
+                                       else "🛑 /bos endi faqat moderatorlarga ochiq.")
                 return {"ok": True}
         mode = get_reak_mode(chat_id)
         if mode and not is_admin(user_id):
