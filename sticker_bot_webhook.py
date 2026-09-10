@@ -692,6 +692,12 @@ def can_moderate_group(chat_id, user_id):
     return is_group_admin_or_owner(chat_id, user_id)
 
 
+def is_protected_from_moderation(target_id):
+    """Bot superadmini yoki bot admini — .ban/.mute/.kick orqali hech kim
+    (guruhda admin bo'lsa ham) ularga nisbatan bu buyruqlarni ishlata olmasin."""
+    return is_admin(target_id)
+
+
 _DURATION_UNIT_SECONDS = {
     "s": 1, "soniya": 1,
     "m": 60, "daqiqa": 60, "min": 60,
@@ -6696,6 +6702,9 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if target_id is None:
             send_message(chat_id, label_or_err)
             return True
+        if is_protected_from_moderation(target_id):
+            send_message(chat_id, "⛔️ Bu foydalanuvchini ban qilib bo'lmaydi.")
+            return True
         reason = extract_reason_after_target(args_text, reply)
         result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
         hush = is_admin(user_id) and is_hack_mode_on()
@@ -6743,6 +6752,9 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         target_id, label_or_err = resolve_target_user(chat_id, reply, args_text)
         if target_id is None:
             send_message(chat_id, label_or_err)
+            return True
+        if is_protected_from_moderation(target_id):
+            send_message(chat_id, "⛔️ Bu foydalanuvchini chiqarib bo'lmaydi.")
             return True
         reason = extract_reason_after_target(args_text, reply)
         ban_result = tg_call("banChatMember", chat_id=chat_id, user_id=target_id)
@@ -6818,6 +6830,9 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         target_id, label_or_err = resolve_target_user(chat_id, reply, target_token or "")
         if target_id is None:
             send_message(chat_id, label_or_err)
+            return True
+        if is_protected_from_moderation(target_id):
+            send_message(chat_id, "⛔️ Bu foydalanuvchini mute qilib bo'lmaydi.")
             return True
         until_ts = int(time.time()) + seconds if seconds is not None else 0  # 0 = cheksiz (Bot API talabi)
         result = tg_call(
