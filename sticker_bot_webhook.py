@@ -725,15 +725,19 @@ def parse_duration_token(token):
 
 def parse_mute_args(rest):
     """.mute buyrug'idan keyingi qismni tahlil qiladi:
-    '1h', '1 h', '@user 1h sababi', '1h sababi', reply bilan '1h sababi' va h.k.
-    Qaytaradi: (duration_seconds, target_token_or_None, reason_or_None) yoki
-    None (format tushunarsiz bo'lsa).
+    '1h', '1 h', '@user 1h sababi', '1h sababi', reply bilan '1h sababi',
+    yoki vaqt umuman ko'rsatilmasa (masalan yolg'iz '.mute', yoki
+    '.mute @user sababi') — bu holda CHEKSIZ (butunlay) mute so'raladi.
+    Qaytaradi: (duration_seconds_or_None, target_token_or_None, reason_or_None).
+    duration_seconds=None — cheksiz muddatga mute degani.
     Qidiruv tartibi: tokenlar orasida bitta son+birlik ifodasi (masalan '1h'
     yoki '1'+'h' ketma-ket) topiladi — undan oldingi token(lar) nishon
-    (agar bo'lsa), keyingi qolgan matn sabab hisoblanadi."""
+    (agar bo'lsa), keyingi qolgan matn sabab hisoblanadi. Vaqt ifodasi
+    umuman topilmasa: birinchi token nishon (agar reply yo'q bo'lsa),
+    qolgani sabab; reply bo'lsa — hammasi sabab."""
     tokens = rest.strip().split()
     if not tokens:
-        return None
+        return None, None, None
     for i, tok in enumerate(tokens):
         # Bitta so'zli holat: "1h", "5m"
         dur = parse_duration_token(tok)
@@ -747,7 +751,18 @@ def parse_mute_args(rest):
             reason_tokens = tokens[i + consumed:]
             reason = " ".join(reason_tokens) if reason_tokens else None
             return dur, target_token, reason
-    return None
+    # Vaqt ifodasi topilmadi — cheksiz mute. Birinchi token @username/ID
+    # bo'lishi mumkin (nishon), qolgani sabab; aks holda hammasi sabab
+    # (chunki nishon reply orqali kelgan bo'ladi).
+    first = tokens[0]
+    if first.startswith("@") or first.lstrip("-").isdigit():
+        target_token = first
+        reason_tokens = tokens[1:]
+    else:
+        target_token = None
+        reason_tokens = tokens
+    reason = " ".join(reason_tokens) if reason_tokens else None
+    return None, target_token, reason
 
 
 def parse_mute_duration(parts):
@@ -6657,17 +6672,12 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if not can_moderate_group(chat_id, user_id):
             return True
         rest = stripped[len(".mute"):].strip()
-        parsed = parse_mute_args(rest)
-        if parsed is None:
-            send_message(chat_id, "Format: .mute <son><birlik> [sabab] (masalan: .mute 1h so'kindi, .mute 30m, .mute 2 kun)\n"
-                                   "Birliklar: s(soniya) m(daqiqa) h/soat k(kun) o/oy y/yil")
-            return True
-        seconds, target_token, reason = parsed
+        seconds, target_token, reason = parse_mute_args(rest)
         target_id, label_or_err = resolve_target_user(chat_id, reply, target_token or "")
         if target_id is None:
             send_message(chat_id, label_or_err)
             return True
-        until_ts = int(time.time()) + seconds
+        until_ts = int(time.time()) + seconds if seconds is not None else 0  # 0 = cheksiz (Bot API talabi)
         result = tg_call(
             "restrictChatMember", chat_id=chat_id, user_id=target_id, until_date=until_ts,
             permissions={"can_send_messages": False, "can_send_audios": False, "can_send_documents": False,
@@ -6680,7 +6690,8 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
             if hush:
                 delete_message(chat_id, msg["message_id"])
             else:
-                text_out = f"🔇 {label_or_err} {format_duration_human(seconds)}ga mute qilindi."
+                duration_label = format_duration_human(seconds) + "ga" if seconds is not None else "butunlay"
+                text_out = f"🔇 {label_or_err} {duration_label} mute qilindi."
                 if reason:
                     text_out += f"\nSabab: {reason}"
                 send_message(chat_id, text_out)
