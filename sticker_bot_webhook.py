@@ -844,6 +844,8 @@ def default_state():
         "reak_pending": {},  # {str(user_id): {"chat_id","group_message_id","free"}} — invoice/emoji tanlash oralig'i
         "hack_mode": False,  # global: bot admin/superadmin moderatsiya buyruqlari iz qoldirmasin
         "bos_open_groups": [],  # [chat_id_str, ...] — bu guruhlarda /bos ni HAMMA ishlata oladi
+        "phelp_global_open": False,  # True bo'lsa .phelp ni BARCHA guruhlarda hamma ishlatadi
+        "phelp_open_groups": [],  # [chat_id_str, ...] — global yopiq bo'lsa ham, bu guruhlarda hamma ishlata oladi
         "reply_open_groups": [],  # [chat_id_str, ...] — .replymode on: bu guruhlarda .reply ni HAMMA ishlata oladi
         "tgs_open_groups": [],  # [chat_id_str, ...] — .tgsmode on: bu guruhlarda .tgs ni HAMMA ishlata oladi
         "last_broadcast_unreachable": [],  # [user_id_str, ...] — oxirgi broadcast'da yetib bormagan/bloklagan userlar
@@ -914,6 +916,8 @@ def _merge_with_defaults(loaded):
     merged.setdefault("processed_payments", [])
     merged.setdefault("hack_mode", False)
     merged.setdefault("bos_open_groups", [])
+    merged.setdefault("phelp_global_open", False)
+    merged.setdefault("phelp_open_groups", [])
     merged.setdefault("reply_open_groups", [])
     merged.setdefault("tgs_open_groups", [])
     merged.setdefault("last_broadcast_unreachable", [])
@@ -3591,6 +3595,24 @@ def back_to_panel_keyboard():
     return {"inline_keyboard": [[{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}]]}
 
 
+def _group_detail_view(gid):
+    with _state_lock:
+        info = dict(STATE.get("groups", {}).get(gid, {}))
+    pretty = json.dumps(info, ensure_ascii=False, indent=2)
+    text = f"👨‍👩‍👧 <b>Guruh {gid}</b>\n<pre>{pretty}</pre>"
+    bos_status = "🟢 Hammaga ochiq" if is_bos_open_group(gid) else "🔴 Faqat adminlar"
+    with _state_lock:
+        phelp_open = gid in STATE.get("phelp_open_groups", [])
+    phelp_status = "🟢 Hammaga ochiq" if phelp_open else "🔴 Faqat adminlar"
+    keyboard = {"inline_keyboard": [
+        [{"text": "🔗 Meni taklif qil (invite link)", "callback_data": f"invite_me:{gid}"}],
+        [{"text": f"🎯 /bos: {bos_status}", "callback_data": f"toggle_bos_group:{gid}"}],
+        [{"text": f"📖 .phelp: {phelp_status}", "callback_data": f"toggle_phelp_group:{gid}"}],
+        [{"text": "⬅️ Guruhlar", "callback_data": "panel_groups:0"}],
+    ]}
+    return text, keyboard
+
+
 def admin_panel_keyboard(user_id):
     """Oddiy admin — cheklangan panel (ko'rish + broadcast).
     Superadmin — to'liq boshqaruv panelini ko'radi."""
@@ -3631,6 +3653,10 @@ def admin_panel_keyboard(user_id):
         rows.append([{"text": "🤖 Bot admin joylar", "callback_data": "panel_botadmin"}])
         hack_status = "🟢 Yoqilgan" if is_hack_mode_on() else "🔴 O'chirilgan"
         rows.append([{"text": f"🥷 Hack mode: {hack_status}", "callback_data": "toggle_hack_mode"}])
+        with _state_lock:
+            phelp_global = STATE.get("phelp_global_open", False)
+        phelp_status = "🟢 Hammaga (barcha guruh)" if phelp_global else "🔴 Faqat moderatorlarga"
+        rows.append([{"text": f"📖 .phelp: {phelp_status}", "callback_data": "toggle_phelp_global"}])
     else:
         rows.append([
             {"text": "📣 Broadcast", "callback_data": "panel_broadcast"},
@@ -3659,6 +3685,85 @@ def _paginate_keyboard(items, prefix, page):
         rows.append(nav)
     rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
     return {"inline_keyboard": rows}
+
+
+GROUP_HELP_TEXT = (
+    "📋 <b>Guruhdagi oddiy buyruqlar</b>\n\n"
+    "🔹 <code>.del</code> — reply qilingan xabarni o'chirish\n"
+    "🔹 <code>.ban [@user/ID] [sabab]</code> — ban qilish\n"
+    "🔹 <code>.unban [@user/ID] [sabab]</code> — ban'dan chiqarish\n"
+    "🔹 <code>.kick [@user/ID] [sabab]</code> — chiqarish (qaytib kira oladi)\n"
+    "🔹 <code>.mute [son+birlik] [sabab]</code> — vaqtga yoki butunlay mute "
+    "(masalan: <code>.mute 1h so'kindi</code>). Birliklar: s/m/h(soat)/k(kun)/o(oy)/y(yil). "
+    "Vaqt ko'rsatilmasa — butunlay mute.\n"
+    "🔹 <code>.unmute [@user/ID] [sabab]</code> — mute'dan chiqarish\n"
+    "🔹 <code>.reply &lt;pack&gt; &lt;raqam&gt;</code> — reply qilingan xabarga stiker tashlash\n"
+    "🔹 <code>.tgs &lt;pack&gt; &lt;raqam&gt;</code> — pack'dan stiker olish\n"
+    "🔹 <code>.yoz</code> — slow mode paytida guruhga yozish tugmasi\n"
+    "🔹 <code>/bos &lt;emoji&gt;</code> — reply qilingan xabarga reaksiya bosish\n\n"
+    "🎛 <b>Rejimlar</b> (yoqish/o'chirish: on/off):\n"
+    "🔹 <code>.reakmode on/off</code> — avtomatik reaksiya\n"
+    "🔹 <code>.replymode on/off</code> — .reply'ni hammaga ochish\n"
+    "🔹 <code>.tgsmode on/off</code> — .tgs'ni hammaga ochish\n"
+    "🔹 <code>.bosmode on/off</code> — /bos'ni hammaga ochish\n\n"
+    "📦 Pack ID'larini olish uchun botga <b>shaxsiy chatda</b> yozing.\n"
+    "🔎 To'liq (barcha) funksiyalar ro'yxati uchun: <code>.phelp</code>"
+)
+
+
+FULL_HELP_TEXT = (
+    "📖 <b>To'liq funksiyalar ro'yxati</b>\n\n"
+    "━━━ 👥 <b>Guruh — moderatsiya</b> ━━━\n"
+    "<code>.del</code> — reply qilingan xabarni o'chirish\n"
+    "<code>.ban [@user/ID] [sabab]</code> — ban qilish\n"
+    "<code>.unban [@user/ID] [sabab]</code> — ban'dan chiqarish\n"
+    "<code>.kick [@user/ID] [sabab]</code> — chiqarish (qaytadi)\n"
+    "<code>.mute [son+birlik] [sabab]</code> — mute (s/m/h/k/o/y "
+    "birliklari; vaqtsiz — butunlay)\n"
+    "<code>.unmute [@user/ID] [sabab]</code> — mute'dan chiqarish\n"
+    "<code>.addadmin</code> / <code>.deladmin</code> — (reply, faqat superadmin) bot admin qo'shish/olish\n\n"
+    "━━━ 🎨 <b>Guruh — stiker/kontent</b> ━━━\n"
+    "<code>.reply &lt;pack&gt; &lt;raqam&gt;</code> — reply qilingan xabarga stiker\n"
+    "<code>.tgs &lt;pack&gt; &lt;raqam&gt;</code> — pack'dan stiker olish\n"
+    "<code>.zip</code> / <code>.zipstiker</code> / <code>.zipgif</code> — (bot admin, reply) media ZIP qilish\n"
+    "<code>.yoz</code> — slow mode paytida guruhga yozish tugmasi\n"
+    "<code>/bos &lt;emoji&gt;</code> — reply qilingan xabarga reaksiya\n\n"
+    "━━━ 🎛 <b>Guruh — rejimlar</b> (on/off) ━━━\n"
+    "<code>.reakmode</code> — avtomatik reaksiya (5⭐ yoki bot admin uchun bepul)\n"
+    "<code>.replymode</code> — .reply'ni hammaga ochish\n"
+    "<code>.tgsmode</code> — .tgs'ni hammaga ochish\n"
+    "<code>.bosmode</code> — /bos'ni hammaga ochish\n"
+    "🥷 <b>Hack mode</b> — superadmin panelidan, bot admin/superadmin "
+    "buyruqlari iz qoldirmasligi uchun\n\n"
+    "━━━ 💬 <b>Yordamchi buyruqlar</b> ━━━\n"
+    "<code>.help</code> — oddiy foydalanuvchilar uchun qisqa yordam\n"
+    "<code>.phelp</code> — ushbu to'liq ro'yxat (buyruq avtomatik o'chiriladi)\n\n"
+    "━━━ 👤 <b>Shaxsiy chat (bot bilan)</b> ━━━\n"
+    "📦 Pack yuklab olish — stiker/emoji/GIF forward qiling yoki pack "
+    "nomini/havolasini yuboring, ZIP qilib beriladi\n"
+    "🆔 Pack ID'larini olish (ketma-ket yoki barchasi birdan)\n"
+    "📤 Publish qilish — ZIP/sticker/pack/ID orqali yangi to'plam yasash (Stars orqali)\n"
+    "🔗 Referal tizimi — do'st taklif qilib limitni oshirish\n"
+    "📊 Limitim — joriy so'rov limitini ko'rish\n"
+    "🎁 Bonus kanallar — qo'shimcha limit uchun kanallarga qo'shilish\n"
+    "💰 Tariflar / Premium — cheklovsiz foydalanish\n"
+    "🏆 Reyting — referal reytingi\n"
+    "🔑 Avto-javob (Business) — biznes akkount uchun kalit-so'z javoblari\n"
+    "🕐 Bio soat (Business) — bio'da jonli soat ko'rsatish\n\n"
+    "━━━ 🛠 <b>Admin/Superadmin panel</b> (botga shaxsiy yozib) ━━━\n"
+    "👥 Foydalanuvchilar ro'yxati / 🔎 User qidirish (ID yoki harflab)\n"
+    "👨‍👩‍👧 Guruhlar / 📢 Kanallar ro'yxati\n"
+    "📣 Broadcast (yetib bormaganlarni avtomatik aniqlab, tozalash imkoniyati bilan)\n"
+    "✍️ Adminlarga xabar / 💬 Foydalanuvchiga yozish\n"
+    "📢 Bot nomidan guruhga yozish\n"
+    "🛡 Adminlar ro'yxati / 🤖 Bot admin joylar\n"
+    "⚡ Reaksiya emoji sozlash / ✨ Bot imzosi (premium emoji)\n"
+    "⭐ Stars balansi / Gift\n"
+    "🏆 Referal reyting / 📤 Eksport (CSV)\n"
+    "⚙️ Limit sozlamalari\n"
+    "🗄 Backup (userbot orqali, API asosida to'liq tarix)\n"
+    "🥷 Hack mode yoqish/o'chirish\n"
+)
 
 
 def build_help_text(user_id):
@@ -4539,6 +4644,18 @@ def handle_callback_query(cq):
         safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard(user_id))
         return
 
+    if data == "toggle_phelp_global":
+        if user_id != SUPERADMIN_ID:
+            answer_callback_query(cq_id, "Bu faqat superadmin uchun.", show_alert=True)
+            return
+        with _state_lock:
+            new_value = not bool(STATE.get("phelp_global_open", False))
+            STATE["phelp_global_open"] = new_value
+            save_state_locked()
+        answer_callback_query(cq_id, ".phelp: " + ("hammaga ochildi 🟢" if new_value else "faqat moderatorlarga qaytdi 🔴"))
+        safe_edit_or_send(chat_id, message_id, "🛠 Boshqaruv paneli:", reply_markup=admin_panel_keyboard(user_id))
+        return
+
     if data == "remove_unreachable_users":
         answer_callback_query(cq_id)
         with _state_lock:
@@ -4750,16 +4867,7 @@ def handle_callback_query(cq):
     if data.startswith("group_detail:"):
         answer_callback_query(cq_id)
         gid = data.split(":", 1)[1]
-        with _state_lock:
-            info = dict(STATE.get("groups", {}).get(gid, {}))
-        pretty = json.dumps(info, ensure_ascii=False, indent=2)
-        text = f"👨‍👩‍👧 <b>Guruh {gid}</b>\n<pre>{pretty}</pre>"
-        bos_status = "🟢 Hammaga ochiq" if is_bos_open_group(gid) else "🔴 Faqat adminlar"
-        keyboard = {"inline_keyboard": [
-            [{"text": "🔗 Meni taklif qil (invite link)", "callback_data": f"invite_me:{gid}"}],
-            [{"text": f"🎯 /bos: {bos_status}", "callback_data": f"toggle_bos_group:{gid}"}],
-            [{"text": "⬅️ Guruhlar", "callback_data": "panel_groups:0"}],
-        ]}
+        text, keyboard = _group_detail_view(gid)
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
@@ -4768,16 +4876,24 @@ def handle_callback_query(cq):
         gid = data.split(":", 1)[1]
         new_value = toggle_bos_open_group(gid)
         answer_callback_query(cq_id, "/bos: " + ("hammaga ochildi 🟢" if new_value else "faqat adminlarga qaytdi 🔴"))
+        text, keyboard = _group_detail_view(gid)
+        safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data.startswith("toggle_phelp_group:"):
+        answer_callback_query(cq_id)
+        gid = data.split(":", 1)[1]
         with _state_lock:
-            info = dict(STATE.get("groups", {}).get(gid, {}))
-        pretty = json.dumps(info, ensure_ascii=False, indent=2)
-        text = f"👨‍👩‍👧 <b>Guruh {gid}</b>\n<pre>{pretty}</pre>"
-        bos_status = "🟢 Hammaga ochiq" if new_value else "🔴 Faqat adminlar"
-        keyboard = {"inline_keyboard": [
-            [{"text": "🔗 Meni taklif qil (invite link)", "callback_data": f"invite_me:{gid}"}],
-            [{"text": f"🎯 /bos: {bos_status}", "callback_data": f"toggle_bos_group:{gid}"}],
-            [{"text": "⬅️ Guruhlar", "callback_data": "panel_groups:0"}],
-        ]}
+            lst = STATE.setdefault("phelp_open_groups", [])
+            if gid in lst:
+                lst.remove(gid)
+                new_value = False
+            else:
+                lst.append(gid)
+                new_value = True
+            save_state_locked()
+        answer_callback_query(cq_id, ".phelp: " + ("hammaga ochildi 🟢" if new_value else "faqat adminlarga qaytdi 🔴"))
+        text, keyboard = _group_detail_view(gid)
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
         return
 
@@ -6428,6 +6544,18 @@ def can_use_bos(chat_id, user_id):
     return is_bos_open_group(chat_id)
 
 
+def can_use_phelp(chat_id, user_id):
+    """.phelp ni kim ishlata oladi: bot admin/superadmin, guruh admini/egasi
+    doim ishlata oladi. Oddiy user — agar global 'hammaga ochiq' yoqilgan
+    bo'lsa YOKI shu guruh alohida 'ochiq' deb belgilangan bo'lsa."""
+    if can_moderate_group(chat_id, user_id):
+        return True
+    with _state_lock:
+        if STATE.get("phelp_global_open", False):
+            return True
+        return str(chat_id) in STATE.get("phelp_open_groups", [])
+
+
 # ---------- .replymode / .tgsmode — .reply va .tgs'ni oddiy userlarga ochish ----------
 
 def _is_open_group(state_key, chat_id):
@@ -6666,6 +6794,20 @@ def handle_group_dot_commands(msg, chat_id, user_id, text):
         if result and result.get("ok"):
             new_msg_id = result["result"]["message_id"]
             tg_call("pinChatMessage", chat_id=chat_id, message_id=new_msg_id, disable_notification=True)
+        return True
+
+    if stripped == ".help":
+        send_message(chat_id, GROUP_HELP_TEXT, parse_mode_html=True)
+        return True
+
+    if stripped == ".phelp":
+        if not can_use_phelp(chat_id, user_id):
+            return True
+        send_message(chat_id, FULL_HELP_TEXT, parse_mode_html=True)
+        if bot_is_group_admin(chat_id):
+            delete_message(chat_id, msg["message_id"])
+        else:
+            send_message(chat_id, "⚠️ Botni guruhda admin qiling — shunda .phelp buyrug'i avtomatik o'chadi.")
         return True
 
     if stripped.startswith(".mute"):
