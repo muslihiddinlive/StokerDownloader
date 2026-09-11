@@ -6999,7 +6999,15 @@ def webhook():
     ILGARI bu himoya yo'q edi — agar biror joyda exception chiqsa,
     Flask 500 qaytarardi va FOYDALANUVCHI HECH QANDAY XABAR OLMASDI
     (na natija, na xato xabari) - aynan shu 'javob bermayapti'
-    muammosining eng ehtimolli sababi shu edi."""
+    muammosining eng ehtimolli sababi shu edi.
+
+    Bundan tashqari: har bir so'rov (muvaffaqiyatli yoki xato bilan
+    tugasin) oxirida STATE'da o'zgarish bo'lgan bo'lsa, DARHOL
+    Telegram DB guruhga yoziladi (force_flush_state). Ilgari bu
+    yozish fon threadida ~2 soniya kechiktirilib amalga oshar edi —
+    agar shu oraliqda Render qayta ishga tushsa (deploy, restart),
+    hali yozilmagan o'zgarish (masalan admin panelida qilingan
+    o'zgarish) butunlay yo'qolib qolar edi."""
     try:
         return _webhook_impl()
     except Exception as e:
@@ -7020,6 +7028,11 @@ def webhook():
         except Exception:
             log.exception("Xato haqida xabar berishning o'zi ham muvaffaqiyatsiz bo'ldi")
         return {"ok": True}
+    finally:
+        try:
+            force_flush_state()
+        except Exception:
+            log.exception("webhook() oxirida force_flush_state xatosi")
 
 
 def _webhook_impl():
