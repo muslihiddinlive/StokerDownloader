@@ -1942,6 +1942,7 @@ def add_group_admin(user_id):
         if user_id not in STATE.get("group_admins", []):
             STATE.setdefault("group_admins", []).append(user_id)
             save_state_locked()
+            _flush_state_now_locked()
 
 
 def remove_group_admin(user_id):
@@ -1949,6 +1950,7 @@ def remove_group_admin(user_id):
         if user_id in STATE.get("group_admins", []):
             STATE["group_admins"].remove(user_id)
             save_state_locked()
+            _flush_state_now_locked()
 
 
 def compute_user_limit(user_id):
