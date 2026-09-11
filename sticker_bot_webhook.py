@@ -3630,6 +3630,22 @@ def back_to_panel_keyboard():
     return {"inline_keyboard": [[{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}]]}
 
 
+def _admins_panel_view():
+    with _state_lock:
+        admins = list(STATE["admins"])
+        group_admins = list(STATE.get("group_admins", []))
+    rows = [[{"text": f"❌ id:{a}", "callback_data": f"remove_admin:{a}"}] for a in admins]
+    rows.append([{"text": "➕ Bot admin qo'shish", "callback_data": "add_admin_start"}])
+    rows.append([{"text": "━━━ 👥 Group Adminlar ━━━", "callback_data": "noop"}])
+    rows.extend([[{"text": f"❌ id:{a}", "callback_data": f"remove_group_admin:{a}"}] for a in group_admins])
+    rows.append([{"text": "➕ Group Admin qo'shish", "callback_data": "add_group_admin_start"}])
+    rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
+    text = (f"🛡 <b>Bot Adminlar</b> ({len(admins)}) — bot ichida to'liq huquq, cheksiz limit\n"
+            f"👥 <b>Group Adminlar</b> ({len(group_admins)}) — faqat guruhda moderatsiya, "
+            f"bot ichida oddiy user")
+    return text, True, {"inline_keyboard": rows}
+
+
 def _group_detail_view(gid):
     with _state_lock:
         info = dict(STATE.get("groups", {}).get(gid, {}))
@@ -5263,17 +5279,15 @@ def handle_callback_query(cq):
                            reply_markup=back_to_panel_keyboard())
         return
 
+    if data == "noop":
+        answer_callback_query(cq_id)
+        return
+
     if data == "panel_admins":
         answer_callback_query(cq_id)
         if user_id != SUPERADMIN_ID:
             return
-        with _state_lock:
-            admins = list(STATE["admins"])
-        rows = [[{"text": f"❌ id:{a}", "callback_data": f"remove_admin:{a}"}] for a in admins]
-        rows.append([{"text": "➕ Admin qo'shish", "callback_data": "add_admin_start"}])
-        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
-        safe_edit_or_send(chat_id, message_id, f"🛡 Adminlar ({len(admins)}):",
-                           reply_markup={"inline_keyboard": rows})
+        safe_edit_or_send(chat_id, message_id, *_admins_panel_view())
         return
 
     if data.startswith("remove_admin:"):
@@ -5282,13 +5296,16 @@ def handle_callback_query(cq):
             return
         target_id = int(data.split(":", 1)[1])
         remove_admin(target_id)
-        with _state_lock:
-            admins = list(STATE["admins"])
-        rows = [[{"text": f"❌ id:{a}", "callback_data": f"remove_admin:{a}"}] for a in admins]
-        rows.append([{"text": "➕ Admin qo'shish", "callback_data": "add_admin_start"}])
-        rows.append([{"text": "⬅️ Superadmin panel", "callback_data": "menu_admin_panel"}])
-        safe_edit_or_send(chat_id, message_id, f"🛡 Adminlar ({len(admins)}):",
-                           reply_markup={"inline_keyboard": rows})
+        safe_edit_or_send(chat_id, message_id, *_admins_panel_view())
+        return
+
+    if data.startswith("remove_group_admin:"):
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        target_id = int(data.split(":", 1)[1])
+        remove_group_admin(target_id)
+        safe_edit_or_send(chat_id, message_id, *_admins_panel_view())
         return
 
     if data == "add_admin_start":
@@ -5298,6 +5315,18 @@ def handle_callback_query(cq):
         set_pending_input(user_id, "add_admin")
         safe_edit_or_send(chat_id, message_id, "Yangi admin qilinadigan foydalanuvchi ID raqamini yuboring:",
                            reply_markup=back_to_panel_keyboard())
+        return
+
+    if data == "add_group_admin_start":
+        answer_callback_query(cq_id)
+        if user_id != SUPERADMIN_ID:
+            return
+        set_pending_input(user_id, "add_group_admin")
+        safe_edit_or_send(chat_id, message_id,
+                           "Group Admin qilinadigan foydalanuvchi ID raqamini yuboring "
+                           "(faqat guruhlarda moderatsiya huquqi beradi):",
+                           reply_markup=back_to_panel_keyboard())
+        return
         return
 
     if data == "panel_forcechannels":
@@ -6023,6 +6052,20 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
             return True
         add_admin(target_id)
         send_message(chat_id, f"✅ id:{target_id} endi bot admini.", decoration_key="m57a14e3a", reply_markup=back_to_panel_keyboard())
+        return True
+
+    if action == "add_group_admin":
+        clear_pending_input(user_id)
+        if user_id != SUPERADMIN_ID:
+            return True
+        try:
+            target_id = int(text.strip())
+        except ValueError:
+            send_message(chat_id, "Butun ID kiriting. Bekor qilindi.", reply_markup=back_to_panel_keyboard())
+            return True
+        add_group_admin(target_id)
+        send_message(chat_id, f"✅ id:{target_id} endi Group Admin (faqat guruh moderatsiyasi).",
+                     reply_markup=back_to_panel_keyboard())
         return True
 
     if action == "stars_gift_send_custom":
