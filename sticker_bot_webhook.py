@@ -686,8 +686,10 @@ def is_group_admin_or_owner(chat_id, user_id):
 
 def can_moderate_group(chat_id, user_id):
     """.del/.ban/.mute/.kick buyruqlarini kim ishlata oladi:
-    bot superadmini, bot admini, guruh admini yoki guruh egasi."""
+    bot superadmini, bot admini, 'Group Admin' roli, guruh admini yoki guruh egasi."""
     if is_admin(user_id):
+        return True
+    if is_group_admin_role(user_id):
         return True
     return is_group_admin_or_owner(chat_id, user_id)
 
@@ -841,6 +843,7 @@ def format_duration_human(seconds):
 def default_state():
     return {
         "admins": [],
+        "group_admins": [],  # [user_id, ...] — faqat guruhda moderatsiya huquqi (bot ichida oddiy user)
         "users": {},
         "known_users": [],
         # Bot qo'shilgan guruh/kanallar kuzatuvi:
@@ -920,6 +923,7 @@ def _merge_with_defaults(loaded):
     for key in ("groups", "channels", "reak_modes", "reak_pending"):
         merged.setdefault(key, {})
     merged.setdefault("processed_payments", [])
+    merged.setdefault("group_admins", [])
     merged.setdefault("hack_mode", False)
     merged.setdefault("bos_open_groups", [])
     merged.setdefault("phelp_global_open", False)
@@ -1922,6 +1926,29 @@ def grant_premium(user_id, days=None):
 def is_admin(user_id):
     with _state_lock:
         return user_id == SUPERADMIN_ID or user_id in STATE["admins"]
+
+
+def is_group_admin_role(user_id):
+    """'Group Admin' — faqat guruhlarda moderatsiya huquqi beradigan alohida
+    rol (bot ichida, private chatda oddiy user kabi qoladi: limit, panel,
+    userlar ro'yxati yo'q). is_admin(user_id) bilan bir emas — bu rol
+    cheksiz limit yoki admin panelga kirish huquqi bermaydi."""
+    with _state_lock:
+        return user_id in STATE.get("group_admins", [])
+
+
+def add_group_admin(user_id):
+    with _state_lock:
+        if user_id not in STATE.get("group_admins", []):
+            STATE.setdefault("group_admins", []).append(user_id)
+            save_state_locked()
+
+
+def remove_group_admin(user_id):
+    with _state_lock:
+        if user_id in STATE.get("group_admins", []):
+            STATE["group_admins"].remove(user_id)
+            save_state_locked()
 
 
 def compute_user_limit(user_id):
@@ -4795,6 +4822,8 @@ def handle_callback_query(cq):
         if not rec.get("username") and rec.get("last_message_id"):
             rows.append([{"text": "↪️ So'nggi xabarini forward qilish", "callback_data": f"usearch_forward:{target_id}"}])
         if user_id == SUPERADMIN_ID:
+            ga_status = "🟢 Group Admin" if is_group_admin_role(target_id) else "⚪️ Group Admin qilish"
+            rows.append([{"text": ga_status, "callback_data": f"toggle_group_admin:{target_id}"}])
             rows.append([
                 {"text": "➕ Limit berish", "callback_data": f"give_limit:{target_id}"},
                 {"text": "💬 Unga yozish", "callback_data": f"dm_start:{target_id}"},
@@ -4804,6 +4833,23 @@ def handle_callback_query(cq):
         rows.append([{"text": "⬅️ Foydalanuvchilar", "callback_data": "panel_users:0"}])
         keyboard = {"inline_keyboard": rows}
         safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+        return
+
+    if data.startswith("toggle_group_admin:"):
+        if user_id != SUPERADMIN_ID:
+            answer_callback_query(cq_id, "Bu faqat superadmin uchun.", show_alert=True)
+            return
+        target_id = int(data.split(":", 1)[1])
+        if is_group_admin_role(target_id):
+            remove_group_admin(target_id)
+            answer_callback_query(cq_id, "Group Admin rolidan olindi.")
+        else:
+            add_group_admin(target_id)
+            answer_callback_query(cq_id, "Group Admin qilib tayinlandi.")
+        # user_detail ekranini yangilangan holat bilan qayta chizamiz
+        cq_reload = dict(cq)
+        cq_reload["data"] = f"user_detail:{target_id}"
+        handle_callback_query(cq_reload)
         return
 
     if data.startswith("user_history:"):
@@ -6474,15 +6520,20 @@ def handle_business_message(msg, business_connection_id):
 
 def can_manage_reak_mode(chat_id, user_id):
     """/reak mode: on ni kim ishlata oladi: bot superadmini/admini (bepul),
-    guruh egasi yoki guruh admini (to'lov bilan)."""
+    'Group Admin' roli, guruh egasi yoki guruh admini (to'lov bilan)."""
     if is_admin(user_id):
+        return True
+    if is_group_admin_role(user_id):
         return True
     return is_group_admin_or_owner(chat_id, user_id)
 
 
 def can_disable_reak_mode(chat_id, user_id):
-    """/reak mode: off ni bot superadmini/admini, guruh egasi yoki guruh admini qila oladi."""
+    """/reak mode: off ni bot superadmini/admini, 'Group Admin' roli,
+    guruh egasi yoki guruh admini qila oladi."""
     if is_admin(user_id):
+        return True
+    if is_group_admin_role(user_id):
         return True
     return is_group_admin_or_owner(chat_id, user_id)
 
@@ -7134,7 +7185,7 @@ def _webhook_impl():
             # Guruh admini/egasi bo'lib qolganmi (to'lov paytida huquqi o'zgargan bo'lishi mumkin) —
             # baribir tanlash imkoniyatini beramiz, lekin "amalga oshirilmaydi" belgisini
             # payer huquqiga qarab hozir belgilab qo'yamiz.
-            effective = is_group_admin_or_owner(group_chat_id, payer_id) or is_admin(payer_id)
+            effective = is_group_admin_or_owner(group_chat_id, payer_id) or is_admin(payer_id) or is_group_admin_role(payer_id)
             if effective:
                 set_pending_input(payer_id, "reak_pick_emoji", {"chat_id": group_chat_id, "free": False})
                 send_message(group_chat_id, f"✅ To'lov qabul qilindi ({total_amount} Stars). Qaysi reaksiya bo'lsin?",
