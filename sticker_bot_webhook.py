@@ -3666,8 +3666,29 @@ def _group_detail_view(gid):
 
 def admin_panel_keyboard(user_id):
     """Oddiy admin — cheklangan panel (ko'rish + broadcast).
-    Superadmin — to'liq boshqaruv panelini ko'radi."""
+    Superadmin — to'liq boshqaruv panelini ko'radi.
+    Group Admin — eng cheklangan panel: faqat guruh bilan bog'liq narsalar
+    (Foydalanuvchilar, Backup, Foydalanuvchiga yozish, Broadcast yo'q)."""
     is_super = user_id == SUPERADMIN_ID
+    is_group_admin_only = is_group_admin_role(user_id) and not is_admin(user_id)
+
+    if is_group_admin_only:
+        rows = [
+            [{"text": "🔎 User qidirish", "callback_data": "panel_user_search"}],
+            [
+                {"text": "👨‍👩‍👧 Guruhlar", "callback_data": "panel_groups:0"},
+                {"text": "📢 Kanallar", "callback_data": "panel_channels:0"},
+            ],
+            [
+                {"text": "🔒 Majburiy kanallar", "callback_data": "panel_forcechannels"},
+                {"text": "🎁 Bonus kanallar", "callback_data": "panel_bonuschannels"},
+            ],
+            [{"text": "✍️ Adminlarga xabar", "callback_data": "panel_admin_message"}],
+            [{"text": "📢 Bot nomidan guruhga yozish", "callback_data": "panel_group_write:0"}],
+            [{"text": "⬅️ Bosh menyu", "callback_data": "menu_home"}],
+        ]
+        return {"inline_keyboard": rows}
+
     rows = [
         [{"text": "👥 Foydalanuvchilar", "callback_data": "panel_users:0"}],
         [{"text": "🔎 User qidirish", "callback_data": "panel_user_search"}],
@@ -4657,8 +4678,29 @@ def handle_callback_query(cq):
         safe_edit_or_send(chat_id, message_id, f"✅ Reak mode yoqildi: {emoji} endi har bir yangi xabarga qo'yiladi.")
         return
 
-    # ---- Quyidagilar faqat adminlar uchun ----
-    if not is_admin(user_id):
+    # ---- Quyidagilar bot admin/superadmin YOKI Group Admin uchun ----
+    # Group Admin uchun faqat quyidagi (whitelist) callacklar ruxsat
+    # etiladi — bu yerda YO'Q har qanday narsa (Foydalanuvchilar to'liq
+    # ro'yxati, Backup, Foydalanuvchiga yozish, Broadcast, Stars, Limit
+    # sozlamalari va h.k.) avtomatik bloklanadi. Whitelist yondashuvi
+    # tanlangan, chunki panel juda ko'p callback'ga ega — har birini
+    # alohida "taqiqlash" yozish xato qilish xavfini oshiradi.
+    _GROUP_ADMIN_ALLOWED_PREFIXES = (
+        "menu_admin_panel", "panel_user_search", "usearch_by_id", "usearch_letters:",
+        "usearch_letter:", "usearch_backspace", "usearch_clear", "usearch_page:",
+        "user_detail:",
+        "panel_groups:", "group_detail:", "invite_me:",
+        "panel_channels:", "channel_detail:",
+        "panel_forcechannels", "panel_bonuschannels",
+        "panel_admin_message", "adminmsg_",
+        "panel_group_write:", "groupwrite_pick:",
+        "menu_home", "back_to_panel", "noop",
+    )
+    if is_group_admin_role(user_id) and not is_admin(user_id):
+        if not any(data == p or data.startswith(p) for p in _GROUP_ADMIN_ALLOWED_PREFIXES):
+            answer_callback_query(cq_id, "Bu funksiya sizga ruxsat etilmagan.", show_alert=True)
+            return
+    elif not is_admin(user_id):
         answer_callback_query(cq_id)
         return
 
@@ -4708,6 +4750,8 @@ def handle_callback_query(cq):
 
     if data.startswith("panel_users:"):
         answer_callback_query(cq_id)
+        if not is_admin(user_id):
+            return
         page = int(data.split(":", 1)[1])
         with _state_lock:
             uids = list(STATE["known_users"])
@@ -4807,6 +4851,21 @@ def handle_callback_query(cq):
     if data.startswith("user_detail:"):
         answer_callback_query(cq_id)
         target_id = int(data.split(":", 1)[1])
+        if is_group_admin_role(user_id) and not is_admin(user_id):
+            # Group Admin uchun CHEKLANGAN ko'rinish: faqat ID va joriy
+            # limit — pack tarixi, forward, boshqa userga yozish yo'q.
+            mode, limit = compute_user_limit(target_id)
+            period_label = "kunlik" if mode == "daily" else "haftalik"
+            used = get_user_record(target_id).get("count", 0)
+            remaining = max(0, limit - used)
+            text = (
+                f"👤 <b>{user_label(target_id)}</b> (id:{target_id})\n\n"
+                f"📈 Joriy {period_label} limit: <b>{limit}</b> ta\n"
+                f"   (ishlatilgan: {used}, qolgan: {remaining})\n"
+            )
+            keyboard = {"inline_keyboard": [[{"text": "⬅️ Orqaga", "callback_data": "panel_user_search"}]]}
+            safe_edit_or_send(chat_id, message_id, text, parse_mode_html=True, reply_markup=keyboard)
+            return
         rec = get_user_record(target_id)
         counts = rec.get("type_counts", {}) or {}
         premium_label = "ha" if is_premium(target_id) else "yoq"
@@ -5036,6 +5095,8 @@ def handle_callback_query(cq):
 
     if data.startswith("panel_dm_user"):
         answer_callback_query(cq_id)
+        if not is_admin(user_id):
+            return
         page = 0
         if ":" in data:
             try:
@@ -5511,6 +5572,8 @@ def handle_callback_query(cq):
 
     if data == "panel_broadcast":
         answer_callback_query(cq_id)
+        if not is_admin(user_id):
+            return
         set_pending_input(user_id, "broadcast")
         safe_edit_or_send(chat_id, message_id, "📣 Barchaga yuboriladigan xabar matnini yozing:",
                            reply_markup=back_to_panel_keyboard())
@@ -5888,7 +5951,8 @@ def handle_pending_input(chat_id, user_id, text, entities=None):
         label = user_label(target_id)
         lines = [f"👤 <b>{label}</b> (id:{target_id})"]
         rows = []
-        if not rec.get("username") and rec.get("last_message_id"):
+        is_ga_only = is_group_admin_role(user_id) and not is_admin(user_id)
+        if not is_ga_only and not rec.get("username") and rec.get("last_message_id"):
             lines.append("\nUsername yo'q — so'nggi xabarini forward qilib profilga o'tishingiz mumkin.")
             rows.append([{"text": "↪️ So'nggi xabarini forward qilish", "callback_data": f"usearch_forward:{target_id}"}])
         rows.append([{"text": "📋 To'liq profil", "callback_data": f"user_detail:{target_id}"}])
